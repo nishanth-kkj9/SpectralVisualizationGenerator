@@ -1,0 +1,42 @@
+# Build artifacts
+build/
+*.build
+*.suo
+*.user
+
+# IDE files
+.vscode/
+*.code-workspace
+*.ide
+*.workspace
+
+# CMake
+cmake-build-debug/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Visual Studio
+*.sln
+*.vcxproj
+*.slnx
+*.suo
+*.user
+*.sdf
+*.dll
+*.exe
+*.ilk
+*.obj
+*.pdb
+*.exp
+*._ch_
+*.cbk
+*.xml
+
+# Debug files
+*.debug
+*.release
+
+# VCPKG
+vcpkg_installed/
+vcpkg-configuration.json
