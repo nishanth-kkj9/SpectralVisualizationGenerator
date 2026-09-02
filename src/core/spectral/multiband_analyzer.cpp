@@ -79,6 +79,16 @@ MultiBandAnalyzer::AnalyzeResult MultiBandAnalyzer::analyze(
         int band_end_bin;
     };
 
+    // ponytail: precompute windows per unique n_fft — eliminates per-frame alloc.
+    std::vector<std::vector<float>> cached_windows;
+    auto get_window = [&](int n_fft) -> const std::vector<float>& {
+        for (const auto& w : cached_windows) {
+            if (static_cast<int>(w.size()) == n_fft) return w;
+        }
+        cached_windows.push_back(window_hann(n_fft));
+        return cached_windows.back();
+    };
+
     std::vector<BandResult> band_results;
 
     for (const auto& band : bands) {
@@ -111,15 +121,14 @@ MultiBandAnalyzer::AnalyzeResult MultiBandAnalyzer::analyze(
             int offset = band_frame * band_hop;
             if (offset + band.n_fft > static_cast<int>(samples.size())) break;
 
-            auto win = window_hann(band.n_fft);
+            const auto& win = get_window(band.n_fft);
             std::vector<complex_f> buf(band.n_fft);
             for (int i = 0; i < band.n_fft; ++i) {
                 buf[i] = complex_f(samples[offset + i] * win[i], 0.0f);
             }
             fft(buf);
 
-            auto mag = fft_magnitude(buf);
-            auto pwr = fft_power(buf);
+            auto [mag, pwr] = fft_magnitude_power(buf);
 
             for (int b_bin = 0; b_bin < band_bins; ++b_bin) {
                 float freq = static_cast<float>(b_bin) * bin_hz_band;
@@ -281,19 +290,19 @@ MultiBandAnalyzer::AnalyzeResult MultiBandAnalyzer::analyze_single(
         time_axis.frame_times[f] = static_cast<double>(f) * time_axis.frame_duration;
     }
 
+    const auto& win = window_hann(n_fft);
+
     for (int f = 0; f < num_frames; ++f) {
         int offset = f * hop_size;
         if (offset + n_fft > static_cast<int>(samples.size())) break;
 
-        auto win = window_hann(n_fft);
         std::vector<complex_f> buf(n_fft);
         for (int i = 0; i < n_fft; ++i) {
             buf[i] = complex_f(samples[offset + i] * win[i], 0.0f);
         }
         fft(buf);
 
-        auto mag = fft_magnitude(buf);
-        auto pwr = fft_power(buf);
+        auto [mag, pwr] = fft_magnitude_power(buf);
 
         SpectralFrame frame;
         frame.frame_index = f;

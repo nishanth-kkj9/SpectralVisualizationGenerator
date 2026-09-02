@@ -758,7 +758,13 @@ bool SpectralDataset::read_frames(const uint8_t* data, size_t size, size_t& off)
 
 bool SpectralDataset::serialize_binary(std::vector<uint8_t>& out) const {
     out.clear();
-    out.reserve(BINARY_HEADER_SIZE + 1024);
+    // ponytail: rough reserve — header + metadata + axes + frames.
+    // Avoids repeated realloc during append.
+    const size_t est = BINARY_HEADER_SIZE
+        + 512  // metadata (file_path, hashes, etc.)
+        + 128  // axes
+        + frames_.size() * (64 + num_frequency_bins() * 12);  // per-frame header + mag/phs/pwr
+    out.reserve(est);
 
     // Header
     write_header(out);

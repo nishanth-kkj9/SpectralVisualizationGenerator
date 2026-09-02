@@ -116,6 +116,23 @@ static std::vector<float> fft_power(const std::vector<complex_f>& X) {
     return pow;
 }
 
+// Combined magnitude+power in a single pass. Avoids redundant sqrt.
+// ponytail: returns {mag, power} to skip a second alloc+loop.
+static std::pair<std::vector<float>, std::vector<float>>
+fft_magnitude_power(const std::vector<complex_f>& X) {
+    int N = static_cast<int>(X.size());
+    std::vector<float> mag(N);
+    std::vector<float> pow(N);
+    for (int k = 0; k < N; ++k) {
+        float re = X[k].real();
+        float im = X[k].imag();
+        float m = static_cast<float>(std::sqrt(re * re + im * im));
+        mag[k] = m;
+        pow[k] = m * m;
+    }
+    return {std::move(mag), std::move(pow)};
+}
+
 // ---------------------------------------------------------------------
 // Frequency / time bin calculations
 // ---------------------------------------------------------------------
