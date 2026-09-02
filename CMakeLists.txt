@@ -78,7 +78,32 @@ add_test(NAME spectralcore_existence
 
 add_executable(spectral_benchmarks
     src/benchmarks/main.cpp
+    src/benchmarks/bench_fft.cpp
+    src/benchmarks/bench_stft.cpp
+    src/benchmarks/bench_dataset_serialization.cpp
+    src/benchmarks/bench_image_rendering.cpp
+    src/benchmarks/bench_png_encoding.cpp
+    src/benchmarks/bench_audio_conversion.cpp
+    src/benchmarks/bench_media_decode.cpp
+    src/benchmarks/bench_video_rendering.cpp
+    src/core/spectral/spectral_dataset.cpp
+    src/core/spectral/multiband_analyzer.cpp
+    src/core/rendering/spectrogram_renderer.cpp
+    src/core/rendering/png_encoder.cpp
+    src/core/media/media_decoder.cpp
+    src/core/encoding/video_encoder.cpp
+    src/core/encoding/video_renderer.cpp
 )
+target_include_directories(spectral_benchmarks PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+    ${CMAKE_SOURCE_DIR}/src/core/dsp
+    ${CMAKE_SOURCE_DIR}/src/core/media
+    ${CMAKE_SOURCE_DIR}/src/core/rendering
+    ${CMAKE_SOURCE_DIR}/src/core/spectral
+    ${CMAKE_SOURCE_DIR}/src/core/encoding
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_definitions(spectral_benchmarks PRIVATE NOMINMAX)
 target_link_libraries(spectral_benchmarks PRIVATE SpectralCore)
 
 set_target_properties(spectral_benchmarks PROPERTIES
