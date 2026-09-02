@@ -355,6 +355,39 @@ set_target_properties(test_reassignment_render PROPERTIES
 )
 add_test(NAME reassignment_render COMMAND test_reassignment_render)
 
+# --- --- Phase 13: Multi-band STFT ---
+add_executable(test_multiband
+    tests/phase13/test_multiband.cpp
+    src/core/spectral/multiband_analyzer.cpp
+    src/core/spectral/spectral_dataset.cpp
+)
+target_include_directories(test_multiband PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/spectral>
+)
+target_link_libraries(test_multiband PRIVATE SpectralCore)
+set_target_properties(test_multiband PROPERTIES
+    CXX_VISIBILITY_PRESET "hidden"
+    CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
+)
+add_test(NAME multiband COMMAND test_multiband)
+
+add_executable(test_multiband_compare
+    tests/phase13/test_multiband_compare.cpp
+    src/core/spectral/multiband_analyzer.cpp
+    src/core/spectral/spectral_dataset.cpp
+)
+target_include_directories(test_multiband_compare PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/spectral>
+)
+target_link_libraries(test_multiband_compare PRIVATE SpectralCore)
+set_target_properties(test_multiband_compare PROPERTIES
+    CXX_VISIBILITY_PRESET "hidden"
+    CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
+)
+add_test(NAME multiband_compare COMMAND test_multiband_compare)
+
 # --- --- Sanitizer-enabled accuracy test builds (non-MSVC only) ---
 if(NOT MSVC)
     # AddressSanitizer + UndefinedBehaviorSanitizer
