@@ -24,7 +24,7 @@ bench::Result bench_backend(int sample_rate, int fft_size, int duration_sec) {
     std::vector<double> wall_times(outer);
     std::vector<double> cpu_times(outer);
 
-    size_t mem_before = get_process_memory_mb();
+    double mem_before = bench::peak_memory_mb();
 
     for (int o = 0; o < outer; ++o) {
         auto w0 = std::chrono::high_resolution_clock::now();
@@ -34,12 +34,14 @@ bench::Result bench_backend(int sample_rate, int fft_size, int duration_sec) {
             int batch_size = (num_samples / n_fft);
             if (batch_size < 1) batch_size = 1;
 
-            std::vector<complex_f> output(n_fft / 2 + 1);
+            std::vector<complex_f> output(batch_size * (n_fft / 2 + 1));
             backend.fft_batch(input.data(), output.data(), n_fft, batch_size);
 
             // Benchmark single-frame fft + magnitude_power
             std::vector<complex_f> frame(n_fft);
-            std::memcpy(frame.data(), input.data(), n_fft * sizeof(complex_f));
+            for (int i = 0; i < n_fft; ++i) {
+                frame[i] = complex_f(input[i], 0.0f);
+            }
             backend.fft(frame);
             backend.fft_magnitude_power(frame);
         }
@@ -51,7 +53,7 @@ bench::Result bench_backend(int sample_rate, int fft_size, int duration_sec) {
         cpu_times[o] = std::chrono::duration<double, std::milli>(c1 - c0).count();
     }
 
-    size_t mem_after = get_process_memory_mb();
+    double mem_after = bench::peak_memory_mb();
 
     std::sort(wall_times.begin(), wall_times.end());
     std::sort(cpu_times.begin(), cpu_times.end());
