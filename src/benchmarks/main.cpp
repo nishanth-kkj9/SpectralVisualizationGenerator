@@ -15,6 +15,7 @@ bench::Result bench_png_encoding(int sample_rate, int fft_size, int duration_sec
 bench::Result bench_audio_conversion(int sample_rate, int fft_size, int duration_sec);
 bench::Result bench_media_decode(int sample_rate, int fft_size, int duration_sec);
 bench::Result bench_video_rendering(int sample_rate, int fft_size, int duration_sec);
+bench::Result bench_backend(int sample_rate, int fft_size, int duration_sec);
 
 static void print_usage() {
     printf("Usage: spectral_benchmarks [OPTIONS]\n\n");
@@ -106,6 +107,7 @@ int main(int argc, char* argv[]) {
         run_if("audio_conversion", [&]() { return bench_audio_conversion(sr, 4096, 60); });
         run_if("media_decode", [&]() { return bench_media_decode(sr, 4096, 60); });
         run_if("video_rendering", [&]() { return bench_video_rendering(sr, 4096, 60); });
+        run_if("backend", [&]() { return bench_backend(sr, 4096, 60); });
     }
 
     // Write JSON output

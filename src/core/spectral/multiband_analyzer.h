@@ -5,6 +5,8 @@
 
 namespace Spectral {
 
+class SpectralBackend;
+
 struct BandConfig {
     float freq_low;    // Hz
     float freq_high;   // Hz
@@ -24,14 +26,16 @@ public:
         const std::vector<float>& samples,
         int sample_rate,
         int n_fft = 1024,
-        int hop_size = 256
+        int hop_size = 256,
+        const SpectralBackend* backend = nullptr
     );
 
     static AnalyzeResult analyze_single(
         const std::vector<float>& samples,
         int sample_rate,
         int n_fft,
-        int hop_size
+        int hop_size,
+        const SpectralBackend* backend = nullptr
     );
 };
 

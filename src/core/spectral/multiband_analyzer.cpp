@@ -1,4 +1,5 @@
 #include "multiband_analyzer.h"
+#include "spectral_backend.h"
 #include "fft.h"
 #include <algorithm>
 #include <chrono>
@@ -43,7 +44,8 @@ MultiBandAnalyzer::AnalyzeResult MultiBandAnalyzer::analyze(
     const std::vector<float>& samples,
     int sample_rate,
     int n_fft,
-    int hop_size)
+    int hop_size,
+    const SpectralBackend* backend)
 {
     auto t0 = std::chrono::high_resolution_clock::now();
 
@@ -126,9 +128,13 @@ MultiBandAnalyzer::AnalyzeResult MultiBandAnalyzer::analyze(
             for (int i = 0; i < band.n_fft; ++i) {
                 buf[i] = complex_f(samples[offset + i] * win[i], 0.0f);
             }
-            fft(buf);
+            if (backend) {
+                backend->fft(buf);
+            } else {
+                fft(buf);
+            }
 
-            auto [mag, pwr] = fft_magnitude_power(buf);
+            auto [mag, pwr] = backend ? backend->fft_magnitude_power(buf) : fft_magnitude_power(buf);
 
             for (int b_bin = 0; b_bin < band_bins; ++b_bin) {
                 float freq = static_cast<float>(b_bin) * bin_hz_band;
@@ -239,7 +245,8 @@ MultiBandAnalyzer::AnalyzeResult MultiBandAnalyzer::analyze_single(
     const std::vector<float>& samples,
     int sample_rate,
     int n_fft,
-    int hop_size)
+    int hop_size,
+    const SpectralBackend* backend)
 {
     auto t0 = std::chrono::high_resolution_clock::now();
 
@@ -300,9 +307,13 @@ MultiBandAnalyzer::AnalyzeResult MultiBandAnalyzer::analyze_single(
         for (int i = 0; i < n_fft; ++i) {
             buf[i] = complex_f(samples[offset + i] * win[i], 0.0f);
         }
-        fft(buf);
+        if (backend) {
+            backend->fft(buf);
+        } else {
+            fft(buf);
+        }
 
-        auto [mag, pwr] = fft_magnitude_power(buf);
+        auto [mag, pwr] = backend ? backend->fft_magnitude_power(buf) : fft_magnitude_power(buf);
 
         SpectralFrame frame;
         frame.frame_index = f;

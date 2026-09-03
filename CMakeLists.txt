@@ -86,6 +86,7 @@ add_executable(spectral_benchmarks
     src/benchmarks/bench_audio_conversion.cpp
     src/benchmarks/bench_media_decode.cpp
     src/benchmarks/bench_video_rendering.cpp
+    src/benchmarks/bench_backend.cpp
     src/core/spectral/spectral_dataset.cpp
     src/core/spectral/multiband_analyzer.cpp
     src/core/rendering/spectrogram_renderer.cpp
@@ -461,6 +462,21 @@ if(NOT MSVC)
         )
     endif()
 endif()
+
+# --- --- Phase 16: Spectral backend interface ---
+add_executable(test_phase16
+    tests/accuracy/test_phase16.cpp
+)
+target_include_directories(test_phase16 PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
+)
+target_link_libraries(test_phase16 PRIVATE SpectralCore)
+set_target_properties(test_phase16 PROPERTIES
+    CXX_VISIBILITY_PRESET "hidden"
+    CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
+    WIN32_EXECUTABLE OFF
+)
+add_test(NAME phase16 COMMAND test_phase16)
 
 if(DEFINED ENV{VCPKG_ROOT})
     set(CMAKE_TOOLCHAIN_FILE "${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
