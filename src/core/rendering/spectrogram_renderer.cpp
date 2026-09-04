@@ -2,6 +2,10 @@
 #include "png_encoder.h"
 #include "frequency_scale.h"
 #include "thread_pool.h"
+#ifdef _WIN32
+#include "gpu_spectrogram.h"
+#include "d3d11_context.h"
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -417,6 +421,21 @@ RenderError SpectrogramRenderer::render_to_png(const SpectralDataset& dataset,
         return RenderError::InvalidDimensions;
     }
     return RenderError::Ok;
+}
+
+RenderError SpectrogramRenderer::render_gpu(const SpectralDataset& dataset,
+                                            RGBAImage& out) const {
+#ifdef _WIN32
+    // ponytail: static context — device init once, reused across renders
+    static D3D11Context ctx;
+    static GpuSpectrogram gpu(ctx);
+    if (!gpu.is_available()) return render(dataset, out);  // CPU fallback
+    RenderError err = gpu.render(dataset, cfg_, out);
+    if (err != RenderError::Ok) return render(dataset, out);  // GPU fail → CPU
+    return RenderError::Ok;
+#else
+    return render(dataset, out);
+#endif
 }
 
 } // namespace Spectral

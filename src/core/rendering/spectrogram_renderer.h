@@ -98,6 +98,10 @@ public:
     RenderError render_to_png(const SpectralDataset& dataset,
                               const std::string& png_path) const;
 
+    // Phase 17 — GPU path via D3D11 compute shaders. Falls back to CPU render()
+    // when GPU is unavailable. Output layout identical to render().
+    RenderError render_gpu(const SpectralDataset& dataset, RGBAImage& out) const;
+
     // Accessors
     const SpectrogramConfig& config() const { return cfg_; }
     void set_config(const SpectrogramConfig& c) { cfg_ = c; }

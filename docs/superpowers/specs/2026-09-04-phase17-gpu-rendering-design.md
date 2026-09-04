@@ -17,7 +17,7 @@ Move spectrogram rendering to GPU via Vulkan compute shaders. Preserve visual ou
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| GPU API | Vulkan compute | Cross-platform, planned in Phase 16 gpu_backend.h, best AMD support |
+| GPU API | DirectX 11 compute (pivoted from Vulkan — no Vulkan SDK on machine; D3D11 headers/libs in Windows SDK, HLSL via D3DCompile, no installs) | Zero-dependency Windows path; Vulkan remains future option |
 | Output tolerance | Visually identical (PSNR > 40dB, SSIM > 0.99) | Bit-exact parity fragile across IEEE-754 implementations |
 | Shader count | 2 (sample + colorize) | Separates data-dependent sampling from color LUT swap |
 | CPU fallback | Parallel class, config flag | Zero risk to existing rendering path |
