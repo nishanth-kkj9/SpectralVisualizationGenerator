@@ -1,6 +1,7 @@
 # Build artifacts
 build/
 out/
+install/
 *.build
 *.suo
 *.user
@@ -8,63 +9,121 @@ out/
 # IDE files
 .vs/
 .vscode/
+.idea/
 *.code-workspace
 *.ide
 *.workspace
+*.swp
+*~
+.cursor/
+.claude/
+.opencode/
 
-# CMake
-cmake-build-debug/
+# OS residue
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# CMake (incl. CI out-of-source trees)
+cmake-build-*/
 CMakeCache.txt
+CMakeFiles/
 cmake_install.cmake
+CTestTestfile.cmake
+DartConfiguration.tcl
+Testing/
 Makefile
+*.ninja
+.ninja_deps
+.ninja_log
+compile_commands.json
+.cache/
 
-# Visual Studio
+# Visual Studio / MSVC
 *.sln
 *.vcxproj
+*.vcxproj.filters
 *.slnx
-*.suo
-*.user
 *.sdf
-*.dll
-*.exe
 *.ilk
 *.obj
 *.pdb
 *.exp
 *._ch_
 *.cbk
-*.xml
 *.tlog
 *.lastbuildstate
-
-# Debug files
 *.debug
 *.release
+# NOTE: *.dll / *.exe / *.xml intentionally NOT globally ignored:
+# Qt runtime DLLs under dist/ are ignored via dist/ rules below,
+# build-tree binaries stay out via build//out//Testing/ rules above.
 
-# VCPKG
+# Qt generated
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+*.qm
+*.tsbuildinfo
+.qt/
+
+# VCPKG (manifest mode: deps + logs regenerable)
 vcpkg_installed/
+buildtrees/
 vcpkg-configuration.json
 vcpkg_install.log
 vcpkg_install.err
+vcpkg-*.log
+
+# Secrets — never commit
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+secrets.json
+credentials.json
 
 # Test-run artifacts (golden_* fixtures ARE tracked — do not ignore)
 tests/**/debug.wav
+tests/**/*.wav
+!tests/**/golden_*.wav
 tests/**/_*.png
+tests/**/_*.pngb
 tests/**/_*.json
+tests/**/test-results/
 phase19_batch_*/
 phase20_hardening/
 phase18_run_*.png
 
 # Interrupted-job residue
 *.part
+*.tmp
 
 # Benchmark run outputs
 benchmarks/*.json
 benchmark_*.json
+bench_*.json
+
+# Coverage
+*.gcov
+*.gcda
+*.gcno
+coverage/
+lcov.info
 
 # Release packaging outputs (dist/*.ps1 scripts are tracked)
 dist/SpectraScope-portable/
 dist/*.zip
+dist/*.7z
+dist/*.tar.gz
+
+# Python (accuracy harness)
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
 
 # Scratch and logs
 tmp_formats.txt
@@ -72,3 +131,12 @@ tmp_formats.txt
 
 # Agent working notes (regenerable)
 .superpowers/
+.planning/
+task_plan.md
+findings.md
+progress.md
+
+# Repomix / exploration output
+repomix-output.xml
+repomix-output.md
+.repomix/

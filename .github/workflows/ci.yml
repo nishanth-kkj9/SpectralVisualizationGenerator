@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      CMAKE_BUILD_TYPE: Release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install FFmpeg
+        shell: pwsh
+        run: choco install ffmpeg --yes --no-progress
+
+      - name: Restore vcpkg deps
+        uses: actions/cache@v4
+        with:
+          path: vcpkg_installed
+          key: "vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}"
+          restore-keys: "vcpkg-${{ runner.os }}-"
+
+      - name: Configure
+        shell: pwsh
+        run: >
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Release --parallel
+
+      - name: Repo hygiene guard
+        shell: pwsh
+        run: |
+          $leaks = git ls-files | Select-String -Pattern '^(build/|vcpkg_installed/|dist/SpectraScope-portable/|.*\.zip$|.*\.log$|benchmarks/.*\.json$|benchmark_.*\.json$)'
+          if ($leaks) { Write-Error "Build outputs tracked: $($leaks -join ', ')"; exit 1 }
+          $secrets = Get-ChildItem -Recurse -File -Include '*.cpp','*.h','*.ps1','*.json','*.md' -Exclude '*.lock' | Select-String -Pattern '(?i)(AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{36}|-----BEGIN (RSA )?PRIVATE KEY-----)' | Select-Object -First 5
+          if ($secrets) { Write-Error "Possible secret committed"; exit 1 }
+          Write-Output "hygiene ok"
+
+      - name: Test
+        shell: pwsh
+        run: ctest --test-dir build -C Release --output-on-failure
