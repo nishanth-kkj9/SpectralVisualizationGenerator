@@ -1,6 +1,7 @@
 #include "pipeline.h"
 
 #include "fft.h"
+#include "stft.h"
 #include "media_decoder.h"
 #include "spectrogram_renderer.h"
 #include "spectrum_renderer.h"
@@ -120,30 +121,25 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
 
     int frame_idx = 0;
     for (int start = 0; start + cfg.fft_size <= total; start += cfg.hop_size) {
-        std::vector<complex_f> buf(static_cast<size_t>(cfg.fft_size));
-        for (int j = 0; j < cfg.fft_size; ++j)
-            buf[static_cast<size_t>(j)] = complex_f(
-                audio[static_cast<size_t>(start + j)] * win[static_cast<size_t>(j)], 0.0f);
-        fft(buf);
+        // Authoritative STFT: amplitude-corrected one-sided magnitudes.
+        StftFrame fr;
+        if (!stft_frame(audio.data(), total, start, cfg.fft_size, sr, win, cg, fr))
+            return Error::make(Subsystem::Dsp, JobError::AnalysisError,
+                               "dsp: stft frame failed at sample " + std::to_string(start));
+        std::vector<complex_f>& buf = fr.spectrum;
 
         SpectralFrame sf;
         sf.frame_index = frame_idx;
         sf.n_fft = cfg.fft_size;
         sf.window_factor = cg;
-        sf.timestamp = static_cast<double>(start) / static_cast<double>(sr);
-        sf.magnitudes.resize(static_cast<size_t>(num_bins));
-        sf.phases.resize(static_cast<size_t>(num_bins));
-        sf.power.resize(static_cast<size_t>(num_bins));
+        sf.timestamp = fr.timestamp;
+        sf.magnitudes = std::move(fr.magnitudes);
+        sf.phases = std::move(fr.phases);
+        sf.power = std::move(fr.power);
 
-        float scale = 1.0f / static_cast<float>(cfg.fft_size);
         float sum_sq = 0.0f, peak = 0.0f, cn = 0.0f, cd = 0.0f;
         for (int k = 0; k < num_bins; ++k) {
-            float re = buf[static_cast<size_t>(k)].real();
-            float im = buf[static_cast<size_t>(k)].imag();
-            float mag = std::sqrt(re * re + im * im) * scale;
-            sf.magnitudes[static_cast<size_t>(k)] = mag;
-            sf.phases[static_cast<size_t>(k)] = std::atan2(im, re);
-            sf.power[static_cast<size_t>(k)] = mag * mag;
+            float mag = sf.magnitudes[static_cast<size_t>(k)];
             sum_sq += mag * mag;
             if (mag > peak) peak = mag;
             float freq = static_cast<float>(k) * static_cast<float>(sr) / static_cast<float>(cfg.fft_size);

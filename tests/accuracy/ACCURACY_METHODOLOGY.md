@@ -59,83 +59,35 @@ All tolerances are derived from DSP theory, NOT empirical fitting:
 
 ## Machine-Readable Results
 
-Test results are emitted as JSON to `tests/accuracy/results.json`:
+No JSON results file is emitted. Results are the ctest verdict plus the
+measured maxima printed by `dsp_accuracy` (`max_abs_fft_error`,
+`max_abs_roundtrip_error`). Do not reintroduce a results.json writer
+without a consumer for it.
 
-```json
-{
-  "timestamp": "2026-01-01T12:00:00Z",
-  "configuration": { ... },
-  "tests": {
-    "window_functions": [...],
-    "dB_conversion": [...],
-    "frequency_bin": [...],
-    "silence_handling": [...],
-    "multi_rate_combinations": [...]
-  },
-  "summary": {
-    "total_tests": 42,
-    "passed_tests": 42,
-    "pass_rate": 1.0
-  }
-}
-```
+## Sanitizer-Enabled Test Configuration (actual)
 
-## Sanitizer-Enabled Test Configuration
+Sanitizer targets live in `CMakeLists.txt`, not in a separate workflow:
 
-### CMake Configuration
-
-Add sanitizer flags to the test build:
-
-```cmake
-# Sanitizer-enabled build for accuracy tests
-set(CMAKE_CXX_FLAGS_ASAN "${CMAKE_CXX_FLAGS} -fsanitize=address -fsanitize=undefined -fno-omit-frame-pointer")
-set(CMAKE_CXX_FLAGS_MSAN "${CMAKE_CXX_FLAGS} -fsanitize=memory -fno-omit-frame-pointer")
-
-add_executable(test_accuracy_asan tests/accuracy/accuracy_validator.cpp)
-target_compile_options(test_accuracy_asan PRIVATE ${CMAKE_CXX_FLAGS_ASAN})
-target_link_libraries(test_accuracy_asan PRIVATE SpectralCore)
-
-add_executable(test_accuracy_msan tests/accuracy/accuracy_validator.cpp)
-target_compile_options(test_accuracy_msan PRIVATE ${CMAKE_CXX_FLAGS_MSAN})
-target_link_libraries(test_accuracy_msan PRIVATE SpectralCore)
-
-add_test(NAME accuracy_asan
-    COMMAND test_accuracy_asan)
-
-add_test(NAME accuracy_msan
-    COMMAND test_accuracy_msan)
-```
-
-### CI Integration
-
-```yaml
-# .github/workflows/accuracy.yml
-jobs:
-  accuracy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build with ASan
-        run: cmake -DCMAKE_CXX_FLAGS="-fsanitize=address -fsanitize=undefined" -B build && cmake --build build --target test_fft
-      - name: Run accuracy tests (ASan)
-        run: ./build/Debug/test_fft
-      - name: Run accuracy tests (MSan)
-        run: ./build/Debug/test_fft_msan
-```
+- `test_fft_asan` (ASan+UBSan) and `test_fft_msan` (Clang-only) configure
+  on non-MSVC toolchains only.
+- `test_fft_asan_msvc` (`/fsanitize=address`) runs on MSVC and executes
+  in CI as part of the normal `ctest` run. The CI workflow is
+  Windows-only; there is no Linux accuracy workflow.
 
 ## Known Limitations
 
-### FFT Peak Detection (Known Issue)
+### FFT Peak Detection (RESOLVED in S4)
 
-The radix-2 Cooley-Tukey FFT implementation in `fft.h` has a known issue where peak detection returns incorrect bin indices for sine wave inputs. The root cause is under investigation but appears to be in the twiddle factor computation or butterfly staging.
-
-**Impact**: Peak frequency detection accuracy tests are SKIPPED.
-**Workaround**: All other DSP functions (windows, dB conversion, bin/freq math, silence handling) are validated correctly.
-**Status**: Documented; requires further investigation of radix-2 implementation.
+The old forward-only FFT had no true inverse and peak tests were skipped.
+The inverse is now the conjugation method and peak location is tested
+exactly (`test_fft` Test 6, `dsp_accuracy` known-signal suite).
 
 ### Floating-Point Precision
 
-All calculations use `float` (32-bit) precision. Double-precision verification is available via the Python validation suite.
+All production calculations use `float` (32-bit) precision. Independent
+double-precision verification lives in `tests/dsp/test_dsp_accuracy.cpp`
+(naive O(N^2) DFT oracle); the former Python validator was removed in S4
+because it imported production code as its own reference.
 
 ## Running the Tests
 

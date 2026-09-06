@@ -14,15 +14,21 @@ const float PI = static_cast<float>(std::acos(-1.0));
 // ---------------------------------------------------------------------
 // Radix-2 Cooley-Tukey FFT (in-place, complex)
 // ---------------------------------------------------------------------
-// Forward FFT: X[k] = sum_{n=0}^{N-1} x[n] * exp(-2j * pi * k * n / N)
-// In-place, overwrites input. Must have N = 2^m.
+// CONTRACT (see docs/dsp/fft-stft.md for the full statement):
+// - Representation: std::complex<float> vectors, float arithmetic.
+// - Forward: X[k] = sum_{n=0}^{N-1} x[n] * exp(-2j*pi*k*n/N).
+// - Inverse: conjugation method (conjugate, forward, conjugate, scale
+//   1/N), so IFFT(FFT(x)) == x. No normalization is applied inside fft:
+//   callers scale explicitly (STFT divides by N, coherent gain, one-sided
+//   doubling — see stft.h).
+// - Sizes: power of two, N >= 2 (see is_valid_fft_size). Anything else is
+//   left untouched by fft(); use fft_checked() for an explicit verdict.
+// - Bins: bin 0 = DC (sum), bin N/2 = Nyquist (real for real input).
+//   Real-input symmetry X[N-k] == conj(X[k]) holds up to float error.
 
 // Bit-reverse permutation
 static void fft_bit_reverse(std::vector<complex_f>& x) {
     int N = static_cast<int>(x.size());
-    int log2N = 0;
-    while ((1 << log2N) < N) ++log2N;
-
     for (int i = 1, j = 0; i < N; ++i) {
         int bit = N >> 1;
         for (; j & bit; bit >>= 1) j ^= bit;
@@ -37,24 +43,9 @@ static complex_f ftwiddle(int N, int k, int n) {
     return complex_f(std::cos(angle), std::sin(angle));
 }
 
-// Core butterfly: a = a + w * b; b = a - w * b (using temporary)
-static void fft_butterfly(complex_f& a, complex_f& b, const complex_f& w) {
-    complex_f t = w * b;
-    a = a + t;
-    b = a - 2.0f * t;  // corrected: b = original_a - t, but a was overwritten
-    // Proper: need to save original a
-}
-
-// Proper butterfly with temp
-static void fft_butterfly_correct(complex_f& a, complex_f& b, const complex_f& w) {
-    complex_f t = w * b;
-    complex_f new_a = a + t;
-    b = a - t;  // b = original_a - w*original_b, but a is now new_a... hmm
-    // Let me just do it the standard way:
-    // t = w * b;  u = a;  a = u + t;  b = u - t;
-}
-
-// Proper butterfly
+// The one authoritative butterfly: t = w*b; u = a; a = u+t; b = u-t.
+// (Two earlier broken variants lived here; removed in S4. The tests in
+// tests/dsp/test_dsp_accuracy.cpp pin this against an independent DFT.)
 static void fft_butterfly_std(complex_f& a, complex_f& b, const complex_f& w) {
     complex_f t = w * b;
     complex_f u = a;
@@ -62,20 +53,30 @@ static void fft_butterfly_std(complex_f& a, complex_f& b, const complex_f& w) {
     b = u - t;
 }
 
-// Main FFT function
-// If inverse == true, performs IFFT (with 1/N scaling at the end)
+// Power-of-two contract: N >= 2. (N == 1 is a degenerate length the
+// STFT never requests; it is rejected so callers notice bad config.)
+inline bool is_valid_fft_size(int N) {
+    return N >= 2 && (N & (N - 1)) == 0;
+}
+
+// Main FFT function.
+// inverse == false: forward transform (see contract above).
+// inverse == true: mathematical inverse via conjugation, scaled 1/N, so
+// IFFT(FFT(x)) == x up to float rounding.
+// Invalid sizes are left untouched; use fft_checked for an explicit verdict.
 inline void fft(std::vector<complex_f>& x, bool inverse = false) {
     int N = static_cast<int>(x.size());
 
-    // Must be power of 2
-    if (N <= 0 || (N & (N - 1)) != 0) return;
+    if (!is_valid_fft_size(N)) return;
+    if (inverse) {
+        for (auto& v : x) v = std::conj(v);
+    }
 
     // Bit-reversal permutation
     fft_bit_reverse(x);
 
     // Cooley-Tukey butterfly stages
     for (int len = 2; len <= N; len <<= 1) {
-        int step = N / len;
         for (int i = 0; i < N; i += len) {
             for (int j = 0; j < len / 2; ++j) {
                 complex_f w = ftwiddle(N, j, N / len);  // twiddle: W_len^j = exp(-2πi·j/len)
@@ -84,11 +85,17 @@ inline void fft(std::vector<complex_f>& x, bool inverse = false) {
         }
     }
 
-    // If inverse, scale by 1/N
     if (inverse) {
         float invN = 1.0f / static_cast<float>(N);
-        for (auto& sample : x) sample *= invN;
+        for (auto& v : x) v = std::conj(v) * invN;
     }
+}
+
+// Checked entry point: false (input untouched) on invalid sizes.
+inline bool fft_checked(std::vector<complex_f>& x, bool inverse = false) {
+    if (!is_valid_fft_size(static_cast<int>(x.size()))) return false;
+    fft(x, inverse);
+    return true;
 }
 
 // ---------------------------------------------------------------------
@@ -208,17 +215,21 @@ static float window_coherent_gain(const std::vector<float>& w) {
 // dB conversion
 // ---------------------------------------------------------------------
 
-// Power-to-dB: 10 * log10(p / ref), with floor at -90 dB (or ref floor)
+// Power-to-dB: 10 * log10(p / ref), with floor at -90 dB (or ref floor).
+// NaN and non-positive inputs map to the floor (never NaN out); +Inf
+// passes through and is clamped to the display ceiling by renderers.
 static float power_to_db(float power, float ref = 1.0f, float floor_db = -90.0f) {
-    if (power <= 0.0f) return floor_db;
+    if (!(power > 0.0f)) return floor_db;
     float val = 10.0f * std::log10(power / ref);
     if (val < floor_db) return floor_db;
     return static_cast<float>(val);
 }
 
-// Magnitude-to-dB: 20 * log10(mag / ref), with floor
+// Magnitude-to-dB: 20 * log10(mag / ref), with floor.
+// Same NaN contract as power_to_db. Consistent by construction:
+// magnitude_to_db(m) == power_to_db(m*m) up to float rounding.
 static float magnitude_to_db(float mag, float ref = 1.0f, float floor_db = -90.0f) {
-    if (mag <= 0.0f) return floor_db;
+    if (!(mag > 0.0f)) return floor_db;
     float val = 20.0f * std::log10(mag / ref);
     if (val < floor_db) return floor_db;
     return static_cast<float>(val);

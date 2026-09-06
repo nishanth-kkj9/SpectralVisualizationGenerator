@@ -139,10 +139,29 @@ int main() {
     std::cout << "Test 4 (Silence):     " << (test4_pass ? "PASS" : "FAIL") << std::endl;
     std::cout << "Test 5 (Multi-rate):  " << (test5_pass ? "PASS" : "FAIL") << std::endl;
     
-    // Note about FFT peak detection
-    std::cout << "\nNote: FFT peak detection test is SKIPPED due to known issue in radix-2 FFT implementation." << std::endl;
-    std::cout << "      Peak detection accuracy requires further investigation of the radix-2 implementation." << std::endl;
-    std::cout << "      All other DSP functions (windows, dB, bin/freq math, silence) validated correctly." << std::endl;
+    // Test 6: exact-bin peak detection (S4: inverse/forward verified,
+    // independent expectation N/2 at the exact bin, no self-reference).
+    std::cout << "\nTest 6 - Exact-bin peak detection (N=1024, k=100):" << std::endl;
+    bool test6_pass = false;
+    {
+        const int N6 = 1024, k6 = 100;
+        std::vector<std::complex<float>> X6(N6);
+        for (int n = 0; n < N6; ++n)
+            X6[n] = std::complex<float>(
+                static_cast<float>(std::sin(2.0 * M_PI * k6 * n / N6)), 0.0f);
+        ::fft(X6, false);
+        int peak = 0;
+        float peak_mag = 0.0f;
+        for (int k = 1; k < N6 / 2; ++k) {
+            float m = std::abs(X6[k]);
+            if (m > peak_mag) { peak_mag = m; peak = k; }
+        }
+        std::cout << "  peak bin: " << peak << " (expected " << k6 << ")" << std::endl;
+        std::cout << "  peak mag: " << peak_mag << " (expected " << N6 / 2 << ")" << std::endl;
+        test6_pass = (peak == k6) && (std::abs(peak_mag - N6 / 2.0f) < N6 * 0.01f);
+        std::cout << "  PASS: " << (test6_pass ? "yes" : "no") << std::endl;
+        all_pass = all_pass && test6_pass;
+    }
 
     if (all_pass) {
         std::cout << "\nAll implemented tests PASSED." << std::endl;

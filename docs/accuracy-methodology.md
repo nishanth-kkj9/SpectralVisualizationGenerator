@@ -4,9 +4,13 @@ Full methodology: `tests/accuracy/ACCURACY_METHODOLOGY.md` (tolerances derived
 from DSP theory: 0.5-bin on-bin frequency, 2% amplitude, 0.5 dB power,
 1.0 dB magnitude).
 
-Measured in this release (21/21 ctest pass, Release build):
+Measured in this release (24/24 ctest pass, Release build):
 
-- DSP accuracy suite (`test_fft` + accuracy tests): pass.
+- DSP accuracy suite (`test_fft` incl. exact-bin peak + `dsp_accuracy`
+  241 checks vs independent double DFT oracle): pass.
+  `max_abs_fft_error = 2.01e-06`, `max_abs_roundtrip_error = 6.4e-07`.
+  Exact-bin unit sine reads magnitude 1.0 ±2% across N and windows
+  (amplitude-corrected one-sided STFT; see `docs/dsp/fft-stft.md`).
 - Backend parity (`phase16`): CPU backend matches reference FFT/magnitude.
 - GPU-vs-CPU rendering (`gpu_render`, 256×128, 4 interp×colormap combos):
   PSNR 61.8–66.5 dB (threshold 40 dB), SSIM 1.0000 (threshold 0.99).
