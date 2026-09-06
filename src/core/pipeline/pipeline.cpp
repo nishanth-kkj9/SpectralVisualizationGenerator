@@ -68,14 +68,17 @@ static FrequencyScale parse_video_freq_scale(const std::string& s) {
 
 // Canonical window vector from the canonical enum (single source for
 // both analysis and recorded gains). No string fallback anywhere.
+// Fail-closed: any value outside the four known enumerators yields an
+// empty window. Callers treat empty as rejection (stft_frame refuses it;
+// analyze_dataset returns BadConfig). No Hann fallback.
 static std::vector<float> window_for(ProjectWindowType w, int n) {
     switch (w) {
         case ProjectWindowType::Hamming:     return window_hamming(n);
         case ProjectWindowType::Blackman:    return window_blackman(n);
         case ProjectWindowType::Rectangular: return window_rectangular(n);
         case ProjectWindowType::Hann:        return window_hann(n);
+        default:                             return {};
     }
-    return window_hann(n);
 }
 
 static const char* channel_name_for(int ch) {
@@ -210,6 +213,9 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
     const int hop_n = pc.analysis.hop_size;
     dataset.mutable_frequency_axis() = FrequencyAxis(fft_n, sr);
     std::vector<float> win = window_for(pc.analysis.window_type, fft_n);
+    if (win.empty())
+        return Error::make(Subsystem::Pipeline, JobError::BadConfig,
+                           "config: unsupported window type");
     float cg = pc.analysis.window_coherent_gain;
     const int num_bins = fft_n / 2 + 1;
     const int total = static_cast<int>(audio.size());

@@ -143,6 +143,33 @@ int main() {
     const Spectral::ProjectConfig p1 = Spectral::make_project_config(cfg, m);
     const Spectral::ProjectConfig p2 = Spectral::make_project_config(cfg, m);
     CHECK(p1.analysis_fingerprint() == p2.analysis_fingerprint(), "bridge deterministic");
+    // S5.1 path independence: identical bytes under a different path hash
+    // identically, and the analysis fingerprint must not move with the path.
+    std::vector<uint8_t> raw;
+    CHECK(read_bytes(cfg.input_path, raw), "read fixture bytes");
+    const std::string alt = dir + "/same_bytes_renamed.wav";
+    {
+        std::ofstream f(alt, std::ios::binary);
+        CHECK(static_cast<bool>(f), "write renamed copy");
+        f.write(reinterpret_cast<const char*>(raw.data()),
+                static_cast<std::streamsize>(raw.size()));
+    }
+    Spectral::DecodedMedia m2 = m;
+    std::string hash_err2;
+    CHECK(Spectral::sha256_file(alt, m2.file_hash, hash_err2), "hash renamed copy");
+    m2.file_path = alt;
+    CHECK(m2.file_hash == m.file_hash, "content identity ignores path");
+    // file_path is informational and excluded from the analytical
+    // identity: the renamed copy must fingerprint identically, outright.
+    const Spectral::ProjectConfig p3 = Spectral::make_project_config(cfg, m2);
+    CHECK(p3.input.file_path == alt, "renamed path recorded");
+    CHECK(p3.analysis_fingerprint() == p1.analysis_fingerprint(),
+          "path change alone never moves analysis fingerprint");
+    // ...but an analytical change must move it.
+    Spectral::GenerateConfig cfg_hop = cfg;
+    cfg_hop.hop_size = 256;
+    const Spectral::ProjectConfig p4 = Spectral::make_project_config(cfg_hop, m);
+    CHECK(p4.analysis_fingerprint() != p1.analysis_fingerprint(), "hop change moves it");
     fs::remove_all(dir);
     std::printf("\n=== reproducibility: %d/%d passed ===\n", g_pass, g_run);
     return (g_pass == g_run) ? 0 : 1;

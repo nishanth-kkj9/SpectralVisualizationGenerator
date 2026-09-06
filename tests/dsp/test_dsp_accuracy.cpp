@@ -387,6 +387,14 @@ void test_windows() {
     // symmetric endpoints: Hann/Hamming/Blackman start and end at ~0
     CHECK(window_hann(N).front() < 1e-6f && window_hann(N).back() < 1e-6f, "hann endpoints");
     CHECK(window_rectangular(N).front() == 1.0f, "rect endpoints");
+    // S5.1: unknown names fail closed (empty), never silent Hann.
+    // stft_window is the shared public selector; pipeline's window_for
+    // mirrors it (default: {}), and analyze_dataset rejects empty.
+    CHECK(Spectral::stft_window("", N).empty(), "empty name rejected");
+    CHECK(Spectral::stft_window("hannn", N).empty(), "typo rejected");
+    CHECK(Spectral::stft_window("HANN", N).empty(), "case rejected");
+    CHECK(Spectral::stft_window("kaiser", N).empty(), "unimplemented rejected");
+    CHECK(Spectral::stft_window("hann", N).size() == static_cast<size_t>(N), "hann ok");
 }
 
 // --- 7. Normalization: exact-bin unit sine reads 1.0 --------------------------
