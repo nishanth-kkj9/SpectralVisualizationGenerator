@@ -1,0 +1,27 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "windows-release",
+      "displayName": "Windows x64 Release (vcpkg manifest)",
+      "generator": "Visual Studio 18 2026",
+      "architecture": "x64",
+      "toolchainFile": "E:/program_files/vcpkg/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "Qt6_DIR": "${sourceDir}/vcpkg_installed/x64-windows/share/Qt6"
+      }
+    },
+    {
+      "name": "windows-debug",
+      "displayName": "Windows x64 Debug (vcpkg manifest)",
+      "generator": "Visual Studio 18 2026",
+      "architecture": "x64",
+      "toolchainFile": "E:/program_files/vcpkg/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "Qt6_DIR": "${sourceDir}/vcpkg_installed/x64-windows/share/Qt6"
+      }
+    }
+  ]
+}

@@ -1,10 +1,12 @@
 # Build artifacts
 build/
+out/
 *.build
 *.suo
 *.user
 
 # IDE files
+.vs/
 .vscode/
 *.code-workspace
 *.ide
@@ -32,6 +34,8 @@ Makefile
 *._ch_
 *.cbk
 *.xml
+*.tlog
+*.lastbuildstate
 
 # Debug files
 *.debug
@@ -40,3 +44,31 @@ Makefile
 # VCPKG
 vcpkg_installed/
 vcpkg-configuration.json
+vcpkg_install.log
+vcpkg_install.err
+
+# Test-run artifacts (golden_* fixtures ARE tracked — do not ignore)
+tests/**/debug.wav
+tests/**/_*.png
+tests/**/_*.json
+phase19_batch_*/
+phase20_hardening/
+phase18_run_*.png
+
+# Interrupted-job residue
+*.part
+
+# Benchmark run outputs
+benchmarks/*.json
+benchmark_*.json
+
+# Release packaging outputs (dist/*.ps1 scripts are tracked)
+dist/SpectraScope-portable/
+dist/*.zip
+
+# Scratch and logs
+tmp_formats.txt
+*.log
+
+# Agent working notes (regenerable)
+.superpowers/
