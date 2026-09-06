@@ -22,6 +22,7 @@ endif()
 
 add_executable(spectragen
     src/cli/main.cpp
+    src/core/pipeline/pipeline.cpp
     src/core/media/media_decoder.cpp
     src/core/spectral/spectral_dataset.cpp
     src/core/spectral/multiband_analyzer.cpp
@@ -39,6 +40,7 @@ target_include_directories(spectragen PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/rendering>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/spectral>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/encoding>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/pipeline>
 )
 target_compile_definitions(spectragen PRIVATE NOMINMAX)
 target_link_libraries(spectragen PRIVATE SpectralCore d3d11 d3dcompiler)
@@ -52,6 +54,45 @@ set_target_properties(spectragen PROPERTIES
 set_target_properties(spectragen PROPERTIES
     LINK_FLAGS "/SUBSYSTEM:CONSOLE"
 )
+
+# --- --- Phase 18: SpectraScope Qt GUI (thin client over pipeline) ---
+find_package(Qt6 QUIET COMPONENTS Core Gui Widgets)
+if(Qt6_FOUND)
+    set(CMAKE_AUTOMOC ON)
+    add_executable(spectra_gui
+        src/gui/main.cpp
+        src/gui/main_window.cpp
+        src/gui/worker.cpp
+        src/core/pipeline/pipeline.cpp
+        src/core/media/media_decoder.cpp
+        src/core/spectral/spectral_dataset.cpp
+        src/core/spectral/multiband_analyzer.cpp
+        src/core/rendering/spectrogram_renderer.cpp
+        src/core/rendering/gpu_spectrogram.cpp
+        src/core/rendering/d3d11_context.cpp
+        src/core/rendering/spectrum_renderer.cpp
+        src/core/rendering/png_encoder.cpp
+        src/core/encoding/video_encoder.cpp
+        src/core/encoding/video_renderer.cpp
+    )
+    target_include_directories(spectra_gui PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/media
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/rendering
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/spectral
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/encoding
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/pipeline
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/gui
+    )
+    target_compile_definitions(spectra_gui PRIVATE NOMINMAX)
+    target_link_libraries(spectra_gui PRIVATE SpectralCore Qt6::Widgets d3d11 d3dcompiler)
+    set_target_properties(spectra_gui PROPERTIES
+        CXX_VISIBILITY_PRESET "hidden"
+        CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
+        WIN32_EXECUTABLE ON
+    )
+    install(TARGETS spectra_gui RUNTIME DESTINATION bin)
+endif()
 
 enable_testing()
 
@@ -526,6 +567,37 @@ set_target_properties(test_gpu_render PROPERTIES
     WIN32_EXECUTABLE OFF
 )
 add_test(NAME gpu_render COMMAND test_gpu_render)
+
+# --- --- Phase 18: CLI/GUI equivalence (shared pipeline determinism) ---
+add_executable(test_equivalence
+    tests/phase18/test_equivalence.cpp
+    src/core/pipeline/pipeline.cpp
+    src/core/media/media_decoder.cpp
+    src/core/spectral/spectral_dataset.cpp
+    src/core/spectral/multiband_analyzer.cpp
+    src/core/rendering/spectrogram_renderer.cpp
+    src/core/rendering/gpu_spectrogram.cpp
+    src/core/rendering/d3d11_context.cpp
+    src/core/rendering/spectrum_renderer.cpp
+    src/core/rendering/png_encoder.cpp
+    src/core/encoding/video_encoder.cpp
+    src/core/encoding/video_renderer.cpp
+)
+target_include_directories(test_equivalence PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/media>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/rendering>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/spectral>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/encoding>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/pipeline>
+)
+target_compile_definitions(test_equivalence PRIVATE NOMINMAX)
+target_link_libraries(test_equivalence PRIVATE SpectralCore d3d11 d3dcompiler)
+set_target_properties(test_equivalence PROPERTIES
+    CXX_VISIBILITY_PRESET "hidden"
+    CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
+    WIN32_EXECUTABLE OFF
+)
 
 if(DEFINED ENV{VCPKG_ROOT})
     set(CMAKE_TOOLCHAIN_FILE "${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")

@@ -2,14 +2,9 @@
 // Uses MediaDecoder, fft.h, SpectralDataset, and renderers directly.
 // No GUI, no GPU, no duplicated DSP logic beyond STFT loop.
 
-#include "fft.h"
-#include "media_decoder.h"
-#include "spectrogram_renderer.h"
-#include "spectrum_renderer.h"
-#include "png_encoder.h"
-#include "spectral_dataset.h"
+#include "pipeline.h"
 #include "multiband_analyzer.h"
-#include "video_renderer.h"
+#include "spectral_dataset.h"
 
 #include <algorithm>
 #include <cmath>
@@ -40,38 +35,12 @@ enum ExitCode : int {
 };
 
 // ============================================================================
-// CLI configuration
+// CLI configuration — extends shared pipeline config with CLI-only flags.
 // ============================================================================
-struct CliConfig {
-    std::string input_path;
-    std::string output_path;
-    std::string visualization = "spectrogram";
-    int fft_size = 1024;
-    int hop_size = 0;       // 0 = fft_size/2
-    std::string window = "hann";
-    float overlap = 0.5f;
-    float min_freq = 0.0f;
-    float max_freq = 0.0f;  // 0 = auto (nyquist)
-    float db_range = 80.0f;
-    int width = 1024;
-    int height = 512;
+struct CliConfig : public Spectral::GenerateConfig {
     bool show_help = false;
     bool show_version = false;
-    // Video output
-    std::string output_format = "image";  // "image" (PNG) or "video" (MP4/WebM)
-    int fps = 30;
-    std::string video_codec = "libx264";
-    int crf = 18;
-    float window_seconds = 5.0f;
-    // Frequency scale
-    std::string freq_scale = "log";
-    float cqt_center = 440.0f;
-    float cqt_q = 12.0f;
-    // Reassignment
-    bool reassigned = false;
-    // Multi-band comparison
     bool multiband = false;
-    std::vector<float> all_samples;  // decoded audio for multiband analysis
 };
 
 // ============================================================================
@@ -105,6 +74,7 @@ static void print_usage() {
         "  --cqt-q <factor>            CQT quality factor / bins per octave (default: 12)\n"
         "  --reassigned                Use time-frequency reassignment for improved resolution\n"
         "  --multiband                 Compare fixed/short/long/multi-band STFT\n"
+        "  --gpu                       Use GPU spectrogram rendering (CPU fallback)\n"
         "  -h, --help                  Show this help\n"
         "  -V, --version               Show version\n"
         "\n"
@@ -290,6 +260,10 @@ static int parse_args(int argc, char* argv[], CliConfig& cfg) {
             cfg.reassigned = true;
             continue;
         }
+        if (arg == "--gpu") {
+            cfg.use_gpu = true;
+            continue;
+        }
         if (arg == "--multiband") {
             cfg.multiband = true;
             continue;
@@ -331,249 +305,20 @@ static int parse_args(int argc, char* argv[], CliConfig& cfg) {
     return 0;
 }
 
-static Spectral::FrequencyScale parse_freq_scale(const std::string& s) {
-    if (s == "mel")    return Spectral::FrequencyScale::Mel;
-    if (s == "bark")   return Spectral::FrequencyScale::Bark;
-    if (s == "erb")    return Spectral::FrequencyScale::Erb;
-    if (s == "cqt")    return Spectral::FrequencyScale::CQT;
-    if (s == "linear") return Spectral::FrequencyScale::Linear;
-    return Spectral::FrequencyScale::Logarithmic;
-}
-
-// ============================================================================
-// Window function selection
-// ============================================================================
-static std::vector<float> make_window(const std::string& type, int n) {
-    if (type == "hamming")      return window_hamming(n);
-    if (type == "blackman")     return window_blackman(n);
-    if (type == "rectangular")  return window_rectangular(n);
-    return window_hann(n);  // default
-}
-
-// ============================================================================
-// STFT analysis → SpectralDataset
-// ============================================================================
-static int run_analysis(CliConfig& cfg, Spectral::SpectralDataset& dataset) {
-    // Open audio
-    MediaDecoder decoder;
-    if (!decoder.open(cfg.input_path)) {
-        std::cerr << "Error: cannot open '" << cfg.input_path << "'\n";
-        return ExitCode::FileNotFound;
-    }
-
-    int sr = decoder.sample_rate();
-    if (sr <= 0) {
-        std::cerr << "Error: invalid sample rate from decoder\n";
-        return ExitCode::DecodeError;
-    }
-
-    // Configure axes
-    int num_bins = cfg.fft_size / 2 + 1;
-    dataset.mutable_frequency_axis() = Spectral::FrequencyAxis(cfg.fft_size, sr);
-
-    // Window function
-    std::vector<float> win = make_window(cfg.window, cfg.fft_size);
-    float cg = window_coherent_gain(win);
-
-    // Read all audio into buffer (mono mix)
-    std::vector<float> audio;
-    AudioFrame frame;
-    while (decoder.read_frame(frame)) {
-        if (frame.num_channels == 1) {
-            audio.insert(audio.end(), frame.samples.begin(), frame.samples.end());
-        } else {
-            // Mix to mono
-            size_t frame_samples = frame.samples.size() / static_cast<size_t>(frame.num_channels);
-            audio.reserve(audio.size() + frame_samples);
-            for (size_t i = 0; i < frame_samples; ++i) {
-                float sum = 0.0f;
-                for (int ch = 0; ch < frame.num_channels; ++ch) {
-                    sum += frame.samples[i * static_cast<size_t>(frame.num_channels) + ch];
-                }
-                audio.push_back(sum / static_cast<float>(frame.num_channels));
-            }
-        }
-    }
-    decoder.close();
-
-    if (audio.empty()) {
-        std::cerr << "Error: no audio data decoded\n";
-        return ExitCode::DecodeError;
-    }
-
-    cfg.all_samples = audio;
-
-    // STFT loop
-    int total_samples = static_cast<int>(audio.size());
-    int frame_idx = 0;
-    for (int start = 0; start + cfg.fft_size <= total_samples; start += cfg.hop_size) {
-        // Apply window and copy to complex buffer
-        std::vector<complex_f> buf(static_cast<size_t>(cfg.fft_size));
-        for (int j = 0; j < cfg.fft_size; ++j) {
-            buf[static_cast<size_t>(j)] = complex_f(audio[static_cast<size_t>(start + j)] * win[static_cast<size_t>(j)], 0.0f);
-        }
-
-        // Forward FFT
-        fft(buf);
-
-        // Extract magnitudes (positive frequencies only)
-        Spectral::SpectralFrame sf;
-        sf.frame_index = frame_idx;
-        sf.n_fft = cfg.fft_size;
-        sf.window_factor = cg;
-        sf.timestamp = static_cast<double>(start) / static_cast<double>(sr);
-
-        sf.magnitudes.resize(static_cast<size_t>(num_bins));
-        sf.phases.resize(static_cast<size_t>(num_bins));
-        sf.power.resize(static_cast<size_t>(num_bins));
-
-        float scale = 1.0f / static_cast<float>(cfg.fft_size);
-        for (int k = 0; k < num_bins; ++k) {
-            float re = buf[static_cast<size_t>(k)].real();
-            float im = buf[static_cast<size_t>(k)].imag();
-            float mag = std::sqrt(re * re + im * im) * scale;
-            sf.magnitudes[static_cast<size_t>(k)] = mag;
-            sf.phases[static_cast<size_t>(k)] = std::atan2(im, re);
-            sf.power[static_cast<size_t>(k)] = mag * mag;
-        }
-
-        // Per-frame stats
-        float sum_sq = 0.0f;
-        float peak = 0.0f;
-        float centroid_num = 0.0f;
-        float centroid_den = 0.0f;
-        for (int k = 0; k < num_bins; ++k) {
-            float m = sf.magnitudes[static_cast<size_t>(k)];
-            sum_sq += m * m;
-            if (m > peak) peak = m;
-            float freq = static_cast<float>(k) * static_cast<float>(sr) / static_cast<float>(cfg.fft_size);
-            centroid_num += freq * m;
-            centroid_den += m;
-        }
-        sf.rms = std::sqrt(sum_sq / static_cast<float>(num_bins));
-        sf.peak_magnitude = peak;
-        sf.spectral_centroid = (centroid_den > 0.0f) ? centroid_num / centroid_den : 0.0f;
-
-        // Reassignment: compute instantaneous frequency and group delay
-        if (cfg.reassigned) {
-            // Group delay STFT: FFT{n * w[n] * x[n]} (time reassignment kernel)
-            std::vector<complex_f> X_tau(static_cast<size_t>(cfg.fft_size));
-            for (int j = 0; j < cfg.fft_size; ++j) {
-                X_tau[static_cast<size_t>(j)] = complex_f(
-                    static_cast<float>(j) * win[static_cast<size_t>(j)] * audio[static_cast<size_t>(start + j)], 0.0f);
-            }
-            fft(X_tau);
-
-            // Window derivative STFT: FFT{w'[n] * x[n]} (frequency reassignment kernel)
-            std::vector<float> w_deriv(static_cast<size_t>(cfg.fft_size));
-            for (int j = 0; j < cfg.fft_size; ++j) {
-                w_deriv[static_cast<size_t>(j)] = static_cast<float>(PI) / static_cast<float>(cfg.fft_size - 1) *
-                    std::sin(2.0f * PI * static_cast<float>(j) / static_cast<float>(cfg.fft_size - 1));
-            }
-            std::vector<complex_f> X_dg(static_cast<size_t>(cfg.fft_size));
-            for (int j = 0; j < cfg.fft_size; ++j) {
-                X_dg[static_cast<size_t>(j)] = complex_f(
-                    w_deriv[static_cast<size_t>(j)] * audio[static_cast<size_t>(start + j)], 0.0f);
-            }
-            fft(X_dg);
-
-            sf.reassigned_times.resize(static_cast<size_t>(num_bins));
-            sf.reassigned_freqs.resize(static_cast<size_t>(num_bins));
-
-            for (int k = 0; k < num_bins; ++k) {
-                float re = buf[static_cast<size_t>(k)].real();
-                float im = buf[static_cast<size_t>(k)].imag();
-                float mag_sq = re * re + im * im;
-                if (mag_sq > 1e-12f) {
-                    complex_f conj_X(re, -im);
-                    // Instantaneous frequency: base freq + correction from window derivative
-                    float corr_freq = (conj_X * X_dg[static_cast<size_t>(k)]).imag();
-                    sf.reassigned_freqs[static_cast<size_t>(k)] =
-                        static_cast<float>(k) * static_cast<float>(sr) / static_cast<float>(cfg.fft_size) +
-                        corr_freq / (2.0f * PI * mag_sq) * static_cast<float>(sr);
-                    // Group delay: center of mass in time
-                    float dot_tau = (conj_X * X_tau[static_cast<size_t>(k)]).real();
-                    sf.reassigned_times[static_cast<size_t>(k)] =
-                        dot_tau / mag_sq / static_cast<float>(sr);
-                } else {
-                    sf.reassigned_freqs[static_cast<size_t>(k)] = 0.0f;
-                    sf.reassigned_times[static_cast<size_t>(k)] = 0.0f;
-                }
-            }
-        }
-
-        dataset.add_frame(sf);
-        ++frame_idx;
-    }
-
-    if (dataset.frame_count() == 0) {
-        std::cerr << "Error: no frames produced (audio too short for FFT size " << cfg.fft_size << ")\n";
-        return ExitCode::AnalysisError;
-    }
-
-    // Set time axis
-    dataset.mutable_time_axis() = Spectral::TimeAxis(dataset.frame_count(), cfg.hop_size, sr);
-
-    // Set metadata
-    auto& src = dataset.mutable_source_metadata();
-    src.file_path = cfg.input_path;
-
-    auto& am = dataset.mutable_analysis_metadata();
-    am.fft_size = cfg.fft_size;
-    am.hop_size = cfg.hop_size;
-    am.sample_rate = sr;
-
-    return ExitCode::OK;
-}
-
-// ============================================================================
-// Render and write PNG
-// ============================================================================
-static int run_render(const CliConfig& cfg, const Spectral::SpectralDataset& dataset) {
-    if (cfg.visualization == "spectrogram") {
-        Spectral::SpectrogramConfig sc;
-        sc.width = cfg.width;
-        sc.height = cfg.height;
-        sc.freq_scale = parse_freq_scale(cfg.freq_scale);
-        sc.freq_min_hz = (cfg.min_freq > 0) ? cfg.min_freq : 20.0f;
-        sc.freq_max_hz = cfg.max_freq;
-        sc.cqt_center_hz = cfg.cqt_center;
-        sc.cqt_q = cfg.cqt_q;
-        sc.db_ceiling = 0.0f;
-        sc.db_floor = -cfg.db_range;
-
-        Spectral::SpectrogramRenderer renderer(sc);
-        auto err = renderer.render_to_png(dataset, cfg.output_path);
-        if (err != Spectral::RenderError::Ok) {
-            std::cerr << "Error: render failed (code " << static_cast<int>(err) << ")\n";
-            return ExitCode::RenderError;
-        }
-    } else {
-        Spectral::SpectrumConfig sc;
-        sc.width = cfg.width;
-        sc.height = cfg.height;
-        sc.freq_scale = parse_freq_scale(cfg.freq_scale);
-        sc.freq_min_hz = (cfg.min_freq > 0) ? cfg.min_freq : 20.0f;
-        sc.freq_max_hz = cfg.max_freq;
-        sc.cqt_center_hz = cfg.cqt_center;
-        sc.cqt_q = cfg.cqt_q;
-        sc.db_ceiling = 0.0f;
-        sc.db_floor = -cfg.db_range;
-
-        Spectral::SpectrumRenderer renderer(sc);
-        auto err = renderer.render_to_png(dataset, cfg.output_path);
-        if (err != Spectral::SpectrumError::Ok) {
-            std::cerr << "Error: render failed (code " << static_cast<int>(err) << ")\n";
-            return ExitCode::RenderError;
-        }
-    }
-
-    return ExitCode::OK;
-}
-
 // ============================================================================
 // Main
 // ============================================================================
+static int to_exit_code(Spectral::JobError e) {
+    switch (e) {
+        case Spectral::JobError::Ok:           return ExitCode::OK;
+        case Spectral::JobError::FileNotFound: return ExitCode::FileNotFound;
+        case Spectral::JobError::DecodeError:  return ExitCode::DecodeError;
+        case Spectral::JobError::AnalysisError:return ExitCode::AnalysisError;
+        case Spectral::JobError::RenderError:  return ExitCode::RenderError;
+        default:                               return ExitCode::BadArgs;
+    }
+}
+
 int main(int argc, char* argv[]) {
     CliConfig cfg;
     int rc = parse_args(argc, argv, cfg);
@@ -582,28 +327,33 @@ int main(int argc, char* argv[]) {
     if (cfg.show_help) { print_usage(); return ExitCode::OK; }
     if (cfg.show_version) { std::cout << VERSION << "\n"; return ExitCode::OK; }
 
-    // Analyze
-    Spectral::SpectralDataset dataset;
-    rc = run_analysis(cfg, dataset);
-    if (rc != ExitCode::OK) return rc;
+    auto progress = [](float f, const char* stage) {
+        std::cerr << "\r[" << stage << "] " << static_cast<int>(f * 100) << "%" << std::flush;
+    };
 
-    std::cerr << "Analyzed " << dataset.frame_count() << " frames, "
-              << cfg.fft_size << "-point FFT, "
-              << dataset.sample_rate() << " Hz\n";
-
-    // Multi-band comparison
+    // Multi-band comparison needs mid-pipeline access: analyze, print table, render.
     if (cfg.multiband) {
+        Spectral::SpectralDataset dataset;
+        std::vector<float> samples;
+        Spectral::JobError err = Spectral::analyze_dataset(cfg, dataset, samples, progress);
+        std::cerr << "\n";
+        if (err != Spectral::JobError::Ok) return to_exit_code(err);
+
+        std::cerr << "Analyzed " << dataset.frame_count() << " frames, "
+                  << cfg.fft_size << "-point FFT, "
+                  << dataset.sample_rate() << " Hz\n";
+
         int sr = dataset.sample_rate();
         float sr_f = static_cast<float>(sr);
 
         auto fixed = Spectral::MultiBandAnalyzer::analyze_single(
-            cfg.all_samples, sr, cfg.fft_size, cfg.hop_size);
+            samples, sr, cfg.fft_size, cfg.hop_size);
         auto short_w = Spectral::MultiBandAnalyzer::analyze_single(
-            cfg.all_samples, sr, 256, 64);
+            samples, sr, 256, 64);
         auto long_w = Spectral::MultiBandAnalyzer::analyze_single(
-            cfg.all_samples, sr, 4096, 1024);
+            samples, sr, 4096, 1024);
         auto multi = Spectral::MultiBandAnalyzer::analyze(
-            cfg.all_samples, sr, cfg.fft_size, cfg.hop_size);
+            samples, sr, cfg.fft_size, cfg.hop_size);
 
         std::printf("\n%-16s %-15s %-15s %-14s\n",
                     "Method", "Time Res (s)", "Freq Res (Hz)", "Compute (ms)");
@@ -624,37 +374,19 @@ int main(int argc, char* argv[]) {
                     static_cast<float>(multi.dataset.hop_size()) / sr_f,
                     multi.dataset.frequency_resolution(), multi.compute_ms);
         std::printf("\n");
-    }
 
-    // Video output
-    if (cfg.output_format == "video") {
-        Spectral::VideoRendererConfig vrcfg;
-        vrcfg.width = cfg.width;
-        vrcfg.height = cfg.height;
-        vrcfg.fps = cfg.fps;
-        vrcfg.codec = cfg.video_codec;
-        vrcfg.crf = cfg.crf;
-        vrcfg.freq_scale = parse_freq_scale(cfg.freq_scale);
-        vrcfg.freq_min_hz = (cfg.min_freq > 0) ? cfg.min_freq : 20.0f;
-        vrcfg.freq_max_hz = cfg.max_freq;
-        vrcfg.db_floor = -cfg.db_range;
-        vrcfg.db_ceiling = 0.0f;
-        vrcfg.window_seconds = cfg.window_seconds;
-
-        Spectral::VideoRenderer vrend(vrcfg);
-        auto verr = vrend.render(dataset, cfg.output_path);
-        if (verr != Spectral::VideoRenderError::Ok) {
-            std::cerr << "Error: video render failed (code " << static_cast<int>(verr) << ")\n";
-            return ExitCode::RenderError;
-        }
-        std::cerr << "Wrote " << cfg.output_path << " (" << cfg.fps << " fps, "
-                  << cfg.video_codec << " crf=" << cfg.crf << ")\n";
+        rc = to_exit_code(Spectral::render_dataset(cfg, dataset));
+        if (rc != ExitCode::OK) return rc;
+        std::cerr << "Wrote " << cfg.output_path << "\n";
         return ExitCode::OK;
     }
 
-    // Render
-    rc = run_render(cfg, dataset);
-    if (rc != ExitCode::OK) return rc;
+    Spectral::JobError err = Spectral::run_job(cfg, progress);
+    std::cerr << "\n";
+    if (err != Spectral::JobError::Ok) {
+        std::cerr << "Error: job failed (code " << static_cast<int>(err) << ")\n";
+        return to_exit_code(err);
+    }
 
     std::cerr << "Wrote " << cfg.output_path << "\n";
     return ExitCode::OK;

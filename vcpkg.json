@@ -1,0 +1,12 @@
+{
+  "name": "spectral-visualization-generator",
+  "version": "0.1.0",
+  "description": "Spectral Visualization Generator - C++ spectral rendering engine",
+  "dependencies": [
+    {
+      "name": "qtbase",
+      "features": ["gui", "widgets"]
+    }
+  ],
+  "features": {}
+}
