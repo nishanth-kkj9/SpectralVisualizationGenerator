@@ -2,6 +2,7 @@
   "version": 6,
   "configurePresets": [
     {
+      "binaryDir": "${sourceDir}/build",
       "name": "windows-release",
       "displayName": "Windows x64 Release (vcpkg manifest)",
       "generator": "Visual Studio 18 2026",
@@ -13,6 +14,7 @@
       }
     },
     {
+      "binaryDir": "${sourceDir}/build",
       "name": "windows-debug",
       "displayName": "Windows x64 Debug (vcpkg manifest)",
       "generator": "Visual Studio 18 2026",

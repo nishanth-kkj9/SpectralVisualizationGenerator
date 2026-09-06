@@ -6,9 +6,9 @@ images and videos out. Not a music player, DAW, real-time visualizer, or AI app.
 ## Binaries
 
 - `spectragen` — CLI: single jobs + `batch` mode (folders, parallel jobs,
-  retries, per-file results). See `docs/release/cli-usage.md`.
+  retries, per-file results). See `docs/cli-usage.md`.
 - `spectra_gui` — Qt6 desktop thin client over the same pipeline.
-  See `docs/release/gui-usage.md`.
+  See `docs/gui-usage.md`.
 
 ## Workflow
 
@@ -27,11 +27,11 @@ ctest --test-dir build -C Release
 ```
 
 Binaries land in `build/Release/`. Portable packaging:
-`dist/package_portable.ps1`. Details in `docs/release/installation.md`.
+`tools/packaging/package_portable.ps1`. Details in `docs/installation.md`.
 
 ## Docs
 
-- User: `docs/release/` (installation, CLI/GUI usage, formats, methods,
+- User: `docs/` (installation, CLI/GUI usage, formats, methods,
   reproducibility, accuracy + benchmark methodology, limitations)
 - Licensing: `docs/licensing.md`, `THIRD-PARTY-NOTICES.md`
 - Architecture: `docs/architecture/ARCHITECTURE.md`

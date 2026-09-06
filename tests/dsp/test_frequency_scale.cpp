@@ -1,4 +1,4 @@
-// tests/phase11/test_frequency_scale.cpp
+// tests/dsp/test_frequency_scale.cpp
 #include "frequency_scale.h"
 #include <cstdio>
 #include <cmath>

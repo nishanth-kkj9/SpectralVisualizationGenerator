@@ -1,4 +1,4 @@
-// tests/phase12/test_reassignment_render.cpp
+// tests/rendering/test_reassignment_render.cpp
 // Regression tests comparing conventional vs reassigned spectrogram rendering
 #include "spectrogram_renderer.h"
 #include "spectrum_renderer.h"

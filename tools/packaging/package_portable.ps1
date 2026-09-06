@@ -1,8 +1,8 @@
 # Phase 22 — Assemble portable dist/ from the Release build + vcpkg Qt.
-# Usage: powershell -ExecutionPolicy Bypass -File dist/package_portable.ps1
+# Usage: powershell -ExecutionPolicy Bypass -File tools/packaging/package_portable.ps1
 # Output: dist/SpectraScope-portable/ (+ .zip). No installer tooling required.
 $ErrorActionPreference = "Stop"
-$root = Split-Path -Parent $PSScriptRoot
+$root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $out = Join-Path $root "dist/SpectraScope-portable"
 $qtBin = Join-Path $root "vcpkg_installed/x64-windows/bin"
 $qtPlugins = Join-Path $root "vcpkg_installed/x64-windows/Qt6/plugins"

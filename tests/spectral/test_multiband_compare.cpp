@@ -1,4 +1,4 @@
-// tests/phase13/test_multiband_compare.cpp
+// tests/spectral/test_multiband_compare.cpp
 // Comparison tests for multi-band STFT
 #include "fft.h"
 #include "multiband_analyzer.h"

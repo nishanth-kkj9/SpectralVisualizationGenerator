@@ -21,7 +21,7 @@ else()
 endif()
 
 add_executable(spectragen
-    src/cli/main.cpp
+    apps/spectragen/main.cpp
     src/core/pipeline/pipeline.cpp
     src/core/batch/batch.cpp
     src/core/media/media_decoder.cpp
@@ -62,9 +62,9 @@ find_package(Qt6 QUIET COMPONENTS Core Gui Widgets)
 if(Qt6_FOUND)
     set(CMAKE_AUTOMOC ON)
     add_executable(spectra_gui
-        src/gui/main.cpp
-        src/gui/main_window.cpp
-        src/gui/worker.cpp
+        apps/spectrascope/main.cpp
+        apps/spectrascope/main_window.cpp
+        apps/spectrascope/worker.cpp
         src/core/pipeline/pipeline.cpp
         src/core/media/media_decoder.cpp
         src/core/spectral/spectral_dataset.cpp
@@ -84,7 +84,7 @@ if(Qt6_FOUND)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/spectral
         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/encoding
         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/pipeline
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/gui
+        ${CMAKE_CURRENT_SOURCE_DIR}/apps/spectrascope
     )
     target_compile_definitions(spectra_gui PRIVATE NOMINMAX)
     target_link_libraries(spectra_gui PRIVATE SpectralCore Qt6::Widgets d3d11 d3dcompiler)
@@ -104,7 +104,7 @@ add_test(NAME spectragen_basic
 
 # Phase 9 — CLI integration tests
 add_executable(test_spectragen_cli
-    tests/phase9/test_spectragen_cli.cpp
+    tests/cli/test_spectragen_cli.cpp
 )
 target_link_libraries(test_spectragen_cli PRIVATE SpectralCore)
 
@@ -180,7 +180,7 @@ endif()
 
 add_executable(media_probe
     src/core/media/media_decoder.cpp
-    src/core/media/main.cpp
+    apps/media-probe/main.cpp
 )
 
 set_target_properties(media_probe PROPERTIES
@@ -196,7 +196,7 @@ endif()
 install(TARGETS spectragen RUNTIME DESTINATION bin)
 
 add_executable(test_fft
-    src/core/dsp/test_fft.cpp
+    tests/dsp/test_fft.cpp
 )
 
 target_include_directories(test_fft PRIVATE
@@ -210,7 +210,7 @@ install(TARGETS test_fft RUNTIME DESTINATION bin)
 # --- --- SpectralDataset (Phase 5) ---
 add_executable(test_spectral_dataset
     src/core/spectral/spectral_dataset.cpp
-    src/core/spectral/test_spectral_dataset.cpp
+    tests/spectral/test_spectral_dataset.cpp
 )
 target_include_directories(test_spectral_dataset PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/spectral>
@@ -232,7 +232,7 @@ add_executable(test_spectrogram_renderer
     src/core/rendering/gpu_spectrogram.cpp
     src/core/rendering/d3d11_context.cpp
     src/core/spectral/spectral_dataset.cpp
-    src/core/rendering/test_spectrogram_renderer.cpp
+    tests/rendering/test_spectrogram_renderer.cpp
 )
 target_include_directories(test_spectrogram_renderer PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/spectral>
@@ -258,7 +258,7 @@ add_executable(test_spectrum_renderer
     src/core/rendering/d3d11_context.cpp
     src/core/rendering/spectrum_renderer.cpp
     src/core/spectral/spectral_dataset.cpp
-    src/core/rendering/test_spectrum_renderer.cpp
+    tests/rendering/test_spectrum_renderer.cpp
 )
 target_include_directories(test_spectrum_renderer PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/rendering>
@@ -285,7 +285,7 @@ add_executable(test_project_config
     src/core/rendering/d3d11_context.cpp
     src/core/rendering/spectrum_renderer.cpp
     src/core/rendering/png_encoder.cpp
-    src/core/project/test_project_config.cpp
+    tests/cli/test_project_config.cpp
 )
 target_include_directories(test_project_config PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/spectral>
@@ -328,7 +328,7 @@ target_link_libraries(spectral_video_renderer PRIVATE
 )
 
 add_executable(test_video_encoder
-    tests/phase10/test_video_encoder.cpp
+    tests/video/test_video_encoder.cpp
 )
 target_include_directories(test_video_encoder PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/encoding>
@@ -341,7 +341,7 @@ set_target_properties(test_video_encoder PROPERTIES
 add_test(NAME video_encoder COMMAND test_video_encoder)
 
 add_executable(test_video_renderer
-    tests/phase10/test_video_renderer.cpp
+    tests/video/test_video_renderer.cpp
     src/core/spectral/spectral_dataset.cpp
     src/core/rendering/spectrogram_renderer.cpp
     src/core/rendering/gpu_spectrogram.cpp
@@ -368,7 +368,7 @@ set_target_properties(test_video_renderer PROPERTIES
 add_test(NAME video_renderer COMMAND test_video_renderer)
 
 add_executable(test_video_cli
-    tests/phase10/test_video_cli.cpp
+    tests/video/test_video_cli.cpp
 )
 target_include_directories(test_video_cli PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/encoding>
@@ -382,7 +382,7 @@ add_test(NAME video_cli COMMAND test_video_cli $<TARGET_FILE:spectragen>)
 
 # --- --- Phase 11: Frequency scales ---
 add_executable(test_frequency_scale
-    tests/phase11/test_frequency_scale.cpp
+    tests/dsp/test_frequency_scale.cpp
 )
 target_include_directories(test_frequency_scale PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
@@ -394,7 +394,7 @@ set_target_properties(test_frequency_scale PROPERTIES
 add_test(NAME frequency_scale COMMAND test_frequency_scale)
 
 add_executable(test_freqscale_render
-    tests/phase11/test_freqscale_render.cpp
+    tests/rendering/test_freqscale_render.cpp
     src/core/spectral/spectral_dataset.cpp
     src/core/rendering/spectrogram_renderer.cpp
     src/core/rendering/gpu_spectrogram.cpp
@@ -417,7 +417,7 @@ add_test(NAME freqscale_render COMMAND test_freqscale_render)
 
 # --- --- Phase 12: Time-frequency reassignment ---
 add_executable(test_reassignment
-    tests/phase12/test_reassignment.cpp
+    tests/dsp/test_reassignment.cpp
 )
 target_include_directories(test_reassignment PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
@@ -429,7 +429,7 @@ set_target_properties(test_reassignment PROPERTIES
 add_test(NAME reassignment COMMAND test_reassignment)
 
 add_executable(test_reassignment_render
-    tests/phase12/test_reassignment_render.cpp
+    tests/rendering/test_reassignment_render.cpp
     src/core/spectral/spectral_dataset.cpp
     src/core/rendering/spectrogram_renderer.cpp
     src/core/rendering/gpu_spectrogram.cpp
@@ -452,7 +452,7 @@ add_test(NAME reassignment_render COMMAND test_reassignment_render)
 
 # --- --- Phase 13: Multi-band STFT ---
 add_executable(test_multiband
-    tests/phase13/test_multiband.cpp
+    tests/spectral/test_multiband.cpp
     src/core/spectral/multiband_analyzer.cpp
     src/core/spectral/spectral_dataset.cpp
 )
@@ -468,7 +468,7 @@ set_target_properties(test_multiband PROPERTIES
 add_test(NAME multiband COMMAND test_multiband)
 
 add_executable(test_multiband_compare
-    tests/phase13/test_multiband_compare.cpp
+    tests/spectral/test_multiband_compare.cpp
     src/core/spectral/multiband_analyzer.cpp
     src/core/spectral/spectral_dataset.cpp
 )
@@ -487,7 +487,7 @@ add_test(NAME multiband_compare COMMAND test_multiband_compare)
 if(NOT MSVC)
     # AddressSanitizer + UndefinedBehaviorSanitizer
     add_executable(test_fft_asan
-        src/core/dsp/test_fft.cpp
+        tests/dsp/test_fft.cpp
     )
     target_include_directories(test_fft_asan PRIVATE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
@@ -510,7 +510,7 @@ if(NOT MSVC)
     # MemorySanitizer (requires Clang)
     if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
         add_executable(test_fft_msan
-            src/core/dsp/test_fft.cpp
+            tests/dsp/test_fft.cpp
         )
         target_include_directories(test_fft_msan PRIVATE
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
@@ -534,7 +534,7 @@ endif()
 
 # --- --- Phase 16: Spectral backend interface ---
 add_executable(test_phase16
-    tests/accuracy/test_phase16.cpp
+    tests/spectral/test_phase16.cpp
 )
 target_include_directories(test_phase16 PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
@@ -549,7 +549,7 @@ add_test(NAME phase16 COMMAND test_phase16)
 
 # --- --- Phase 17: GPU spectrogram rendering (D3D11 compute) ---
 add_executable(test_gpu_render
-    tests/accuracy/test_gpu_render.cpp
+    tests/rendering/test_gpu_render.cpp
     src/core/spectral/spectral_dataset.cpp
     src/core/rendering/spectrogram_renderer.cpp
     src/core/rendering/gpu_spectrogram.cpp
@@ -572,7 +572,7 @@ add_test(NAME gpu_render COMMAND test_gpu_render)
 
 # --- --- Phase 19: batch processing + integration tests ---
 add_executable(test_batch
-    tests/phase19/test_batch.cpp
+    tests/cli/test_batch.cpp
     src/core/batch/batch.cpp
     src/core/pipeline/pipeline.cpp
     src/core/media/media_decoder.cpp
@@ -606,7 +606,7 @@ add_test(NAME batch COMMAND test_batch)
 
 # --- --- Phase 20: production hardening tests ---
 add_executable(test_hardening
-    tests/phase20/test_hardening.cpp
+    tests/cli/test_hardening.cpp
     src/core/batch/batch.cpp
     src/core/pipeline/pipeline.cpp
     src/core/media/media_decoder.cpp
@@ -643,7 +643,7 @@ add_test(NAME hardening COMMAND test_hardening)
 # --- --- Phase 20: MSVC AddressSanitizer smoke (fail-clearly under ASan) ---
 if(MSVC)
     add_executable(test_fft_asan_msvc
-        src/core/dsp/test_fft.cpp
+        tests/dsp/test_fft.cpp
     )
     target_include_directories(test_fft_asan_msvc PRIVATE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
@@ -659,7 +659,7 @@ endif()
 
 # --- --- Phase 18: CLI/GUI equivalence (shared pipeline determinism) ---
 add_executable(test_equivalence
-    tests/phase18/test_equivalence.cpp
+    tests/cli/test_equivalence.cpp
     src/core/pipeline/pipeline.cpp
     src/core/media/media_decoder.cpp
     src/core/spectral/spectral_dataset.cpp

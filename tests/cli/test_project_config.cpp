@@ -264,9 +264,9 @@ static void test_canonical_key_order() {
 
 static void test_save_load_file() {
     std::fprintf(stderr, "[save_load_file]\n");
-    fs::create_directories("tests/phase8");
+    fs::create_directories("tests/golden");
     auto c = make_default_config();
-    const std::string path = "tests/phase8/_round_trip.json";
+    const std::string path = "tests/golden/_round_trip.json";
     std::string err;
     CHECK(ProjectConfigSerializer::save(path, c, err, /*pretty*/true));
     CHECK(err.empty());
@@ -470,7 +470,7 @@ static void test_old_schema_rejected() {
 
 static void test_golden_reproducible_render() {
     std::fprintf(stderr, "[golden_reproducible_render]\n");
-    fs::create_directories("tests/phase8");
+    fs::create_directories("tests/golden");
     auto c = make_default_config();
     auto d = build_synthetic_dataset(c.analysis.fft_size, c.analysis.sample_rate,
                                       100, 0.5f, 4);
@@ -480,7 +480,7 @@ static void test_golden_reproducible_render() {
     RGBAImage img;
     CHECK_EQ((int)r.render(d, img), (int)SpectrumError::Ok);
 
-    const std::string png_path = "tests/phase8/golden_spectrum_v1.png";
+    const std::string png_path = "tests/golden/golden_spectrum_v1.png";
     CHECK(PNGEncoder::write_rgba(png_path, img.width, img.height, img.pixels.data()));
 
     const std::string expected = png_path + ".expected.png";
@@ -517,9 +517,9 @@ static void test_png_serialization_deterministic() {
     RGBAImage img;
     CHECK_EQ((int)r.render(d, img), (int)SpectrumError::Ok);
 
-    fs::create_directories("tests/phase8");
-    const std::string a_path = "tests/phase8/_det_a.png";
-    const std::string b_path = "tests/phase8/_det_b.png";
+    fs::create_directories("tests/golden");
+    const std::string a_path = "tests/golden/_det_a.png";
+    const std::string b_path = "tests/golden/_det_b.png";
     CHECK(PNGEncoder::write_rgba(a_path, img.width, img.height, img.pixels.data()));
     CHECK(PNGEncoder::write_rgba(b_path, img.width, img.height, img.pixels.data()));
     // Two serializations of the same RGBA buffer must produce identical files.

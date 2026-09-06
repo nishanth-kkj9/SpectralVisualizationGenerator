@@ -44,6 +44,7 @@ compile_commands.json
 *.vcxproj
 *.vcxproj.filters
 *.slnx
+*.dir/
 *.sdf
 *.ilk
 *.obj

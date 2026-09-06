@@ -131,7 +131,7 @@ static std::string find_project_root() {
         "../..",                       // if run from build/Debug/
     };
     for (auto c : candidates) {
-        if (fs::exists(fs::path(c) / "src" / "cli" / "main.cpp")) {
+        if (fs::exists(fs::path(c) / "apps" / "spectragen" / "main.cpp")) {
             return fs::absolute(c).string();
         }
     }
@@ -193,13 +193,13 @@ static void test_full_pipeline_spectrogram(const std::string& exe, const std::st
     std::fprintf(stderr, "[test_full_pipeline_spectrogram]\n");
 
     // Generate WAV
-    std::string wav_path = root + "/tests/phase9/test_sine.wav";
+    std::string wav_path = root + "/tests/cli/test_sine.wav";
     auto samples = gen_sine(44100, 440.0, 0.5);  // 440 Hz, 0.5 sec
     CHECK(write_wav(wav_path, 44100, static_cast<int>(samples.size()), samples.data()),
           "write WAV");
 
     // Run spectragen
-    std::string out_png = root + "/tests/phase9/test_spectrogram.png";
+    std::string out_png = root + "/tests/cli/test_spectrogram.png";
     std::string cmd = "\"" + exe + "\" \"" + wav_path + "\" --output \"" + out_png + "\"";
     int rc = run_cmd(cmd);
     CHECK(rc == 0, "spectrogram pipeline exit 0");
@@ -214,8 +214,8 @@ static void test_full_pipeline_spectrogram(const std::string& exe, const std::st
 static void test_full_pipeline_spectrum(const std::string& exe, const std::string& root) {
     std::fprintf(stderr, "[test_full_pipeline_spectrum]\n");
 
-    std::string wav_path = root + "/tests/phase9/test_sine.wav";
-    std::string out_png = root + "/tests/phase9/test_spectrum.png";
+    std::string wav_path = root + "/tests/cli/test_sine.wav";
+    std::string out_png = root + "/tests/cli/test_spectrum.png";
     std::string cmd = "\"" + exe + "\" \"" + wav_path + "\" --output \"" + out_png + "\" -v spectrum";
     int rc = run_cmd(cmd);
     CHECK(rc == 0, "spectrum pipeline exit 0");
@@ -229,8 +229,8 @@ static void test_full_pipeline_spectrum(const std::string& exe, const std::strin
 static void test_fft_flag(const std::string& exe, const std::string& root) {
     std::fprintf(stderr, "[test_fft_flag]\n");
 
-    std::string wav_path = root + "/tests/phase9/test_sine.wav";
-    std::string out_png = root + "/tests/phase9/test_fft2048.png";
+    std::string wav_path = root + "/tests/cli/test_sine.wav";
+    std::string out_png = root + "/tests/cli/test_fft2048.png";
     std::string cmd = "\"" + exe + "\" \"" + wav_path + "\" --output \"" + out_png + "\" --fft 2048";
     int rc = run_cmd(cmd);
     CHECK(rc == 0, "--fft 2048 exit 0");
@@ -257,10 +257,10 @@ static void test_bad_resolution(const std::string& exe) {
 static void test_cleanup(const std::string& root) {
     std::fprintf(stderr, "[cleanup]\n");
     const char* files[] = {
-        "tests/phase9/test_sine.wav",
-        "tests/phase9/test_spectrogram.png",
-        "tests/phase9/test_spectrum.png",
-        "tests/phase9/test_fft2048.png",
+        "tests/cli/test_sine.wav",
+        "tests/cli/test_spectrogram.png",
+        "tests/cli/test_spectrum.png",
+        "tests/cli/test_fft2048.png",
     };
     for (auto f : files) {
         fs::path p = fs::path(root) / f;

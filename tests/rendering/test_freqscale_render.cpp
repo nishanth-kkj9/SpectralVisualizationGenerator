@@ -1,4 +1,4 @@
-// tests/phase11/test_freqscale_render.cpp
+// tests/rendering/test_freqscale_render.cpp
 #include "spectrogram_renderer.h"
 #include "spectrum_renderer.h"
 #include "spectral_dataset.h"

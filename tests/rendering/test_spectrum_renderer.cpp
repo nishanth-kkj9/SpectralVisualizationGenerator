@@ -480,8 +480,8 @@ static void test_png_roundtrip() {
     RGBAImage out;
     CHECK_EQ(ok(r.render(d, out)), ok(SpectrumError::Ok));
 
-    const std::string path = "tests/phase7/_roundtrip.png";
-    fs::create_directories("tests/phase7");
+    const std::string path = "tests/golden/_roundtrip.png";
+    fs::create_directories("tests/golden");
     CHECK(PNGEncoder::write_rgba(path, out.width, out.height, out.pixels.data()));
 
     int w, h;
@@ -497,7 +497,7 @@ static void test_png_roundtrip() {
 
 static void test_golden_fixtures() {
     std::fprintf(stderr, "[golden_fixtures]\n");
-    fs::create_directories("tests/phase7");
+    fs::create_directories("tests/golden");
 
     struct Case { const char* name; FrequencyScale fs; ColorMap cm; };
     Case cases[] = {
@@ -522,7 +522,7 @@ static void test_golden_fixtures() {
         RGBAImage out;
         CHECK_EQ(ok(r.render(d, out)), ok(SpectrumError::Ok));
 
-        const std::string path = std::string("tests/phase7/golden_") + c.name + ".png";
+        const std::string path = std::string("tests/golden/golden_") + c.name + ".png";
         CHECK(PNGEncoder::write_rgba(path, out.width, out.height, out.pixels.data()));
 
         const std::string expected = path + ".expected.png";
@@ -603,16 +603,16 @@ static void test_no_dsp_recompute() {
 
 static void test_render_to_png() {
     std::fprintf(stderr, "[render_to_png]\n");
-    fs::create_directories("tests/phase7");
+    fs::create_directories("tests/golden");
     auto d = build_dataset(1024, 44100, {50}, {0.5f});
     SpectrumConfig cfg;
     cfg.width = 256; cfg.height = 128;
     cfg.draw_labels = false; cfg.draw_grid = false;
     SpectrumRenderer r(cfg);
-    CHECK_EQ(ok(r.render_to_png(d, "tests/phase7/_render_to_png.png")), ok(SpectrumError::Ok));
-    CHECK(fs::exists("tests/phase7/_render_to_png.png"));
+    CHECK_EQ(ok(r.render_to_png(d, "tests/golden/_render_to_png.png")), ok(SpectrumError::Ok));
+    CHECK(fs::exists("tests/golden/_render_to_png.png"));
     std::error_code ec;
-    CHECK(fs::file_size("tests/phase7/_render_to_png.png", ec) > 0);
+    CHECK(fs::file_size("tests/golden/_render_to_png.png", ec) > 0);
 }
 
 int main() {

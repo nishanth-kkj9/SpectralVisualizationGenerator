@@ -1,4 +1,4 @@
-// tests/phase10/test_video_cli.cpp
+// tests/video/test_video_cli.cpp
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -86,7 +86,7 @@ static int run_cmd(const std::string& cmd) {
 static std::string find_project_root() {
     const char* candidates[] = { ".", "..", "../.." };
     for (auto c : candidates) {
-        if (fs::exists(fs::path(c) / "src" / "cli" / "main.cpp")) {
+        if (fs::exists(fs::path(c) / "apps" / "spectragen" / "main.cpp")) {
             return fs::absolute(c).string();
         }
     }
@@ -111,9 +111,9 @@ static std::vector<float> gen_complex_audio(int sr, float duration) {
 static void test_short_audio(const std::string& exe, const std::string& root) {
     std::fprintf(stderr, "[test_short_audio]\n");
     auto samples = gen_sine(44100, 440.0f, 0.5f);
-    std::string wav = root + "/tests/phase10/short.wav";
+    std::string wav = root + "/tests/video/short.wav";
     write_wav(wav, 44100, static_cast<int>(samples.size()), samples.data());
-    std::string out = root + "/tests/phase10/short.mp4";
+    std::string out = root + "/tests/video/short.mp4";
     std::string cmd = "\"" + exe + "\" \"" + wav + "\" -o \"" + out + "\" --output-format video --fps 10";
     int rc = run_cmd(cmd);
     CHECK(rc == 0, "short audio exit 0");
@@ -125,9 +125,9 @@ static void test_short_audio(const std::string& exe, const std::string& root) {
 static void test_long_audio(const std::string& exe, const std::string& root) {
     std::fprintf(stderr, "[test_long_audio]\n");
     auto samples = gen_sine(44100, 440.0f, 5.0f);
-    std::string wav = root + "/tests/phase10/long.wav";
+    std::string wav = root + "/tests/video/long.wav";
     write_wav(wav, 44100, static_cast<int>(samples.size()), samples.data());
-    std::string out = root + "/tests/phase10/long.mp4";
+    std::string out = root + "/tests/video/long.mp4";
     std::string cmd = "\"" + exe + "\" \"" + wav + "\" -o \"" + out + "\" --output-format video --fps 24";
     int rc = run_cmd(cmd);
     CHECK(rc == 0, "long audio exit 0");
@@ -140,9 +140,9 @@ static void test_different_sample_rates(const std::string& exe, const std::strin
     std::fprintf(stderr, "[test_different_sample_rates]\n");
     for (int sr : {22050, 44100, 48000}) {
         auto samples = gen_sine(sr, 440.0f, 1.0f);
-        std::string wav = root + "/tests/phase10/sr_" + std::to_string(sr) + ".wav";
+        std::string wav = root + "/tests/video/sr_" + std::to_string(sr) + ".wav";
         write_wav(wav, sr, static_cast<int>(samples.size()), samples.data());
-        std::string out = root + "/tests/phase10/sr_" + std::to_string(sr) + ".mp4";
+        std::string out = root + "/tests/video/sr_" + std::to_string(sr) + ".mp4";
         std::string cmd = "\"" + exe + "\" \"" + wav + "\" -o \"" + out
                         + "\" --output-format video --fps 10";
         int rc = run_cmd(cmd);
@@ -155,10 +155,10 @@ static void test_different_sample_rates(const std::string& exe, const std::strin
 static void test_different_fps(const std::string& exe, const std::string& root) {
     std::fprintf(stderr, "[test_different_fps]\n");
     auto samples = gen_sine(44100, 440.0f, 1.0f);
-    std::string wav = root + "/tests/phase10/fps_test.wav";
+    std::string wav = root + "/tests/video/fps_test.wav";
     write_wav(wav, 44100, static_cast<int>(samples.size()), samples.data());
     for (int fps : {5, 15, 30, 60}) {
-        std::string out = root + "/tests/phase10/fps_" + std::to_string(fps) + ".mp4";
+        std::string out = root + "/tests/video/fps_" + std::to_string(fps) + ".mp4";
         std::string cmd = "\"" + exe + "\" \"" + wav + "\" -o \"" + out
                         + "\" --output-format video --fps " + std::to_string(fps);
         int rc = run_cmd(cmd);
@@ -172,9 +172,9 @@ static void test_different_fps(const std::string& exe, const std::string& root) 
 static void test_resolution(const std::string& exe, const std::string& root) {
     std::fprintf(stderr, "[test_resolution]\n");
     auto samples = gen_sine(44100, 440.0f, 0.5f);
-    std::string wav = root + "/tests/phase10/res_test.wav";
+    std::string wav = root + "/tests/video/res_test.wav";
     write_wav(wav, 44100, static_cast<int>(samples.size()), samples.data());
-    std::string out = root + "/tests/phase10/res_test.mp4";
+    std::string out = root + "/tests/video/res_test.mp4";
     std::string cmd = "\"" + exe + "\" \"" + wav + "\" -o \"" + out
                     + "\" --output-format video --resolution 640x480 --fps 10";
     int rc = run_cmd(cmd);
@@ -186,11 +186,11 @@ static void test_resolution(const std::string& exe, const std::string& root) {
 static void test_different_codecs(const std::string& exe, const std::string& root) {
     std::fprintf(stderr, "[test_different_codecs]\n");
     auto samples = gen_sine(44100, 440.0f, 0.5f);
-    std::string wav = root + "/tests/phase10/codec_test.wav";
+    std::string wav = root + "/tests/video/codec_test.wav";
     write_wav(wav, 44100, static_cast<int>(samples.size()), samples.data());
     for (auto& [codec, ext] : std::vector<std::pair<std::string,std::string>>{
         {"libx264", "mp4"}, {"libx265", "mp4"}, {"libvpx-vp9", "webm"}}) {
-        std::string out = root + "/tests/phase10/codec_" + codec + "." + ext;
+        std::string out = root + "/tests/video/codec_" + codec + "." + ext;
         std::string cmd = "\"" + exe + "\" \"" + wav + "\" -o \"" + out
                         + "\" --output-format video --codec " + codec + " --fps 10";
         int rc = run_cmd(cmd);
@@ -209,9 +209,9 @@ static void test_different_codecs(const std::string& exe, const std::string& roo
 static void test_window_seconds(const std::string& exe, const std::string& root) {
     std::fprintf(stderr, "[test_window_seconds]\n");
     auto samples = gen_sine(44100, 440.0f, 3.0f);
-    std::string wav = root + "/tests/phase10/window_test.wav";
+    std::string wav = root + "/tests/video/window_test.wav";
     write_wav(wav, 44100, static_cast<int>(samples.size()), samples.data());
-    std::string out = root + "/tests/phase10/window_test.mp4";
+    std::string out = root + "/tests/video/window_test.mp4";
     std::string cmd = "\"" + exe + "\" \"" + wav + "\" -o \"" + out
                         + "\" --output-format video --fps 10 --duration 2.0";
     int rc = run_cmd(cmd);
@@ -223,10 +223,10 @@ static void test_window_seconds(const std::string& exe, const std::string& root)
 static void test_crf_quality(const std::string& exe, const std::string& root) {
     std::fprintf(stderr, "[test_crf_quality]\n");
     auto samples = gen_sine(44100, 440.0f, 1.0f);
-    std::string wav = root + "/tests/phase10/crf_test.wav";
+    std::string wav = root + "/tests/video/crf_test.wav";
     write_wav(wav, 44100, static_cast<int>(samples.size()), samples.data());
-    std::string out_lo = root + "/tests/phase10/crf_lo.mp4";
-    std::string out_hi = root + "/tests/phase10/crf_hi.mp4";
+    std::string out_lo = root + "/tests/video/crf_lo.mp4";
+    std::string out_hi = root + "/tests/video/crf_hi.mp4";
     std::string cmd_lo = "\"" + exe + "\" \"" + wav + "\" -o \"" + out_lo
                        + "\" --output-format video --fps 10 --crf 10";
     std::string cmd_hi = "\"" + exe + "\" \"" + wav + "\" -o \"" + out_hi
@@ -246,9 +246,9 @@ static void test_crf_quality(const std::string& exe, const std::string& root) {
 static void test_complex_audio(const std::string& exe, const std::string& root) {
     std::fprintf(stderr, "[test_complex_audio]\n");
     auto samples = gen_complex_audio(44100, 2.0f);
-    std::string wav = root + "/tests/phase10/complex.wav";
+    std::string wav = root + "/tests/video/complex.wav";
     write_wav(wav, 44100, static_cast<int>(samples.size()), samples.data());
-    std::string out = root + "/tests/phase10/complex.mp4";
+    std::string out = root + "/tests/video/complex.mp4";
     std::string cmd = "\"" + exe + "\" \"" + wav + "\" -o \"" + out
                     + "\" --output-format video --fps 24 --duration 1.0";
     int rc = run_cmd(cmd);

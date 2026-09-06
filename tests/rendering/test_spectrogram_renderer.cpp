@@ -375,7 +375,7 @@ static void test_png_roundtrip() {
 // ============================================================================
 static void test_golden_fixtures() {
     std::printf("\n[Test 10] Golden image fixtures\n");
-    const std::string golden_dir = "tests/phase6";
+    const std::string golden_dir = "tests/golden";
     std::filesystem::create_directories(golden_dir);
 
     struct Case {

@@ -1,4 +1,4 @@
-// tests/phase12/test_reassignment.cpp
+// tests/dsp/test_reassignment.cpp
 // Numerical tests for time-frequency reassignment
 #include "fft.h"
 #include "windows.h"
