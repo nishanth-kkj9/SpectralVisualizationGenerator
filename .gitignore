@@ -141,3 +141,6 @@ progress.md
 repomix-output.xml
 repomix-output.md
 .repomix/
+
+# Knowledge-graph output (regenerable via /graphify)
+graphify-out/
