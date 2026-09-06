@@ -4,6 +4,7 @@
 // Thin API: fill GenerateConfig, call run_job(). No Qt, no CLI parsing here.
 
 #include "error.h"
+#include "project/project_config.h"
 #include "spectral_dataset.h"
 
 #include <atomic>
@@ -16,6 +17,12 @@ namespace Spectral {
 // Progress: fraction 0..1, stage label ("decode", "analyze", "render", "video").
 using ProgressFn = std::function<void(float, const char*)>;
 
+// GenerateConfig is the CLI/application REQUEST: convenient, stringly,
+// with UI-friendly defaults (hop 0 = fft/2, min_freq 0 = auto).
+// ProjectConfig is the CANONICAL persisted configuration: validated,
+// fully explicit, fingerprinted. make_project_config() is the one
+// authoritative conversion; analysis and dataset metadata must come
+// from its output, never from parallel ad-hoc mappings.
 struct GenerateConfig {
     std::string input_path;
     std::string output_path;
@@ -59,5 +66,12 @@ Error render_dataset(const GenerateConfig& cfg, const Spectral::SpectralDataset&
 
 // Validate config without running. Returns error string, empty if valid.
 std::string validate_config(const GenerateConfig& cfg);
+
+// Canonicalize a validated request: explicit values, decode metadata,
+// content identity. Callers must validate first (or handle BadConfig).
+// GenerateConfig stays the CLI/application request DTO; the returned
+// ProjectConfig is the persisted canonical record analysis derives from.
+ProjectConfig make_project_config(const GenerateConfig& cfg,
+                                  const DecodedMedia& media);
 
 } // namespace Spectral

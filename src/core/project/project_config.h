@@ -10,6 +10,7 @@
 // encoder/parameters were used so a re-encode can reproduce a *similar*
 // file, but lossless byte equality is not promised.
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -46,10 +47,16 @@ enum class RendererKind {
 
 // ============================================================================
 // Frequency axis scale (shared with renderer configs)
+// Mel/Bark/Erb/Cqt are axis remappings of STFT magnitudes today (real
+// filterbanks are a later stage); the enum values persist regardless.
 // ============================================================================
 enum class ProjectFreqScale {
     Linear = 0,
     Logarithmic = 1,
+    Mel = 2,
+    Bark = 3,
+    Erb = 4,
+    Cqt = 5,
 };
 
 // ============================================================================
@@ -109,6 +116,12 @@ struct ProjectAnalysis {
     int channel_mapping = 0;            // 0-based source channel index
     float magnitude_scale = 1.0f;       // post-FFT linear scale
     float phase_unwrap = 0.0f;          // 0 = no unwrap (informational)
+    // What produced the data. Bump analysis_version whenever the math
+    // interpretation changes (normalization, alignment, magnitude
+    // semantics). Tied to the algorithm, NOT the application version.
+    // 2 = amplitude-corrected one-sided STFT (S4+).
+    std::string analysis_method = "stft";
+    uint32_t analysis_version = 2;
 
     bool operator==(const ProjectAnalysis& o) const {
         return fft_size == o.fft_size &&
@@ -120,7 +133,9 @@ struct ProjectAnalysis {
                analyzed_channels == o.analyzed_channels &&
                channel_mapping == o.channel_mapping &&
                magnitude_scale == o.magnitude_scale &&
-               phase_unwrap == o.phase_unwrap;
+               phase_unwrap == o.phase_unwrap &&
+               analysis_method == o.analysis_method &&
+               analysis_version == o.analysis_version;
     }
 };
 
@@ -170,6 +185,8 @@ struct ProjectRenderer {
     int line_thickness = 2;                // spectrum only
     int grid_divisions_x = 8;
     int grid_divisions_y = 6;
+    float cqt_center_hz = 440.0f;          // advanced-scale locus
+    float cqt_q = 12.0f;                   // advanced-scale shape
 
     bool operator==(const ProjectRenderer& o) const {
         return kind == o.kind &&
@@ -181,7 +198,9 @@ struct ProjectRenderer {
                draw_labels == o.draw_labels &&
                line_thickness == o.line_thickness &&
                grid_divisions_x == o.grid_divisions_x &&
-               grid_divisions_y == o.grid_divisions_y;
+               grid_divisions_y == o.grid_divisions_y &&
+               cqt_center_hz == o.cqt_center_hz &&
+               cqt_q == o.cqt_q;
     }
 };
 
@@ -226,7 +245,27 @@ struct ProjectConfig {
     bool validate(std::vector<std::string>& errors) const;
 
     // Convenience
-    std::string fingerprint() const;        // SHA256 of canonical JSON (no comments/whitespace)
+    std::string fingerprint() const;        // SHA256 of canonical JSON (whole document)
+    // Analysis fingerprint: result-affecting fields only (input content
+    // identity + analysis). Informational fields (notes, project_id,
+    // created_utc, renderer, ...) do NOT move it.
+    std::string analysis_fingerprint() const;
+    // Render fingerprint: dataset identity + render-affecting parameters.
+    std::string render_fingerprint(const std::string& dataset_identity) const;
+};
+
+// ============================================================================
+// Decoded media description (bridge input: what the decoder reported).
+// Lives here so pipeline.h stays the only place GenerateConfig appears.
+// ============================================================================
+struct DecodedMedia {
+    std::string file_path;
+    std::string file_hash;      // SHA256 hex of source bytes (may be empty)
+    uint64_t file_size_bytes = 0;
+    int sample_rate = 0;        // effective (post -ar) rate
+    int num_channels = 0;       // native source channels
+    double duration_seconds = 0.0;
+    std::string codec_name;
 };
 
 // ============================================================================
@@ -284,6 +323,12 @@ ProjectColorMap to_renderer_color_map(ProjectColorMap m);    // identity
 // Window-type helpers (string <-> enum).
 const char* window_type_name(ProjectWindowType w);
 ProjectWindowType parse_window_type(const std::string& s);
+// Strict variants: false on unknown strings (no silent default).
+bool try_parse_window_type(const std::string& s, ProjectWindowType& out);
+bool try_parse_renderer_kind(const std::string& s, RendererKind& out);
+bool try_parse_freq_scale(const std::string& s, ProjectFreqScale& out);
+bool try_parse_color_map(const std::string& s, ProjectColorMap& out);
+bool try_parse_reproducibility_tier(const std::string& s, ReproducibilityTier& out);
 
 const char* renderer_kind_name(RendererKind k);
 RendererKind parse_renderer_kind(const std::string& s);
@@ -295,5 +340,11 @@ const char* color_map_name(ProjectColorMap m);
 ProjectColorMap parse_color_map(const std::string& s);
 
 const char* reproducibility_tier_name(ReproducibilityTier t);
+
+// SHA-256 helpers (self-contained, no deps): hex of bytes, hex of string,
+// hex of a file read in chunks. sha256_file returns false + error text.
+std::string sha256_hex(const uint8_t* data, size_t size);
+std::string sha256_hex(const std::string& s);
+bool sha256_file(const std::string& path, std::string& out_hex, std::string& error);
 
 } // namespace Spectral

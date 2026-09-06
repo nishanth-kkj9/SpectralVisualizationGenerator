@@ -5,6 +5,7 @@
 // - Video tier is explicitly NOT claimed byte-identical.
 
 #include "project_config.h"
+#include "pipeline.h"
 #include "spectral_dataset.h"
 #include "spectrum_renderer.h"
 #include "spectrogram_renderer.h"
@@ -596,6 +597,155 @@ static void test_full_pipeline_reproducible() {
     CHECK_EQ(h1, h2);
 }
 
+static void test_strict_enums_reject_unknown() {
+    std::fprintf(stderr, "[strict_enums_reject_unknown]\n");
+    auto base = make_default_config();
+    const std::string json = ProjectConfigSerializer::to_json(base);
+    auto swap_value = [&](const std::string& key, const std::string& bad) {
+        std::string j = json;
+        const std::string k = "\"" + key + "\":";
+        size_t p = j.find(k);
+        if (p == std::string::npos) return std::string();
+        size_t q0 = j.find('\"', p + k.size());
+        size_t q1 = j.find('\"', q0 + 1);
+        j.replace(q0 + 1, q1 - q0 - 1, bad);
+        return j;
+    };
+    ProjectConfig out;
+    std::string err;
+    CHECK(!ProjectConfigSerializer::from_json(swap_value("window_type", "hannn"), out, err));
+    CHECK(!ProjectConfigSerializer::from_json(swap_value("kind", "something_invalid"), out, err));
+    CHECK(!ProjectConfigSerializer::from_json(swap_value("scale", "decibel"), out, err));
+    CHECK(!ProjectConfigSerializer::from_json(swap_value("color_map", "rainbow"), out, err));
+    CHECK(!ProjectConfigSerializer::from_json(swap_value("reproducibility_tier", "forever"), out, err));
+    CHECK(ProjectConfigSerializer::from_json(json, out, err));
+    CHECK(out == base);
+}
+
+static void test_analysis_method_version_round_trip() {
+    std::fprintf(stderr, "[analysis_method_version_round_trip]\n");
+    auto c = make_default_config();
+    c.analysis.analysis_method = "stft";
+    c.analysis.analysis_version = 2;
+    const std::string j = ProjectConfigSerializer::to_json(c);
+    CHECK(j.find("\"analysis_method\":\"stft\"") != std::string::npos);
+    CHECK(j.find("\"analysis_version\":2") != std::string::npos);
+    ProjectConfig out;
+    std::string err;
+    CHECK(ProjectConfigSerializer::from_json(j, out, err));
+    CHECK(out == c);
+}
+
+static void test_analysis_fingerprint_taxonomy() {
+    std::fprintf(stderr, "[analysis_fingerprint_taxonomy]\n");
+    auto base = make_default_config();
+    const std::string a0 = base.analysis_fingerprint();
+    CHECK(a0.size() == 64);
+    CHECK(base.analysis_fingerprint() == a0);
+    auto same = base;
+    same.notes = "different notes";
+    same.project_id = "different-id";
+    same.created_utc = "2030-01-01T00:00:00Z";
+    CHECK(same.analysis_fingerprint() == a0);
+    auto moved = base;
+    moved.renderer.color_map = ProjectColorMap::Heat;
+    CHECK(moved.analysis_fingerprint() == a0);
+    moved = base;
+    moved.dynamic_range.db_floor = -60.0f;
+    CHECK(moved.analysis_fingerprint() == a0);
+    auto v1 = base; v1.analysis.fft_size = 2048;
+    CHECK(v1.analysis_fingerprint() != a0);
+    auto v2 = base; v2.analysis.hop_size = 128;
+    CHECK(v2.analysis_fingerprint() != a0);
+    auto v3 = base; v3.analysis.window_type = ProjectWindowType::Hamming;
+    CHECK(v3.analysis_fingerprint() != a0);
+    auto v4 = base; v4.input.file_hash = "different";
+    CHECK(v4.analysis_fingerprint() != a0);
+    auto v5 = base; v5.analysis.analysis_version = 3;
+    CHECK(v5.analysis_fingerprint() != a0);
+}
+
+static void test_render_fingerprint_taxonomy() {
+    std::fprintf(stderr, "[render_fingerprint_taxonomy]\n");
+    auto base = make_default_config();
+    const std::string r0 = base.render_fingerprint("dataset-id-1");
+    CHECK(r0.size() == 64);
+    auto same = base;
+    same.notes = "other";
+    CHECK(same.render_fingerprint("dataset-id-1") == r0);
+    auto moved = base;
+    moved.renderer.width = 640;
+    CHECK(moved.render_fingerprint("dataset-id-1") != r0);
+    moved = base;
+    moved.dynamic_range.db_floor = -60.0f;
+    CHECK(moved.render_fingerprint("dataset-id-1") != r0);
+    CHECK(base.render_fingerprint("dataset-id-2") != r0);
+}
+
+static void test_adapter_cqt_and_scales() {
+    std::fprintf(stderr, "[adapter_cqt_and_scales]\n");
+    auto c = make_default_config();
+    c.renderer.cqt_center_hz = 220.0f;
+    c.renderer.cqt_q = 24.0f;
+    SpectrogramConfig sc;
+    ProjectConfigAdapter::to_spectrogram_config(c, sc);
+    CHECK(sc.cqt_center_hz == 220.0f);
+    CHECK(sc.cqt_q == 24.0f);
+    SpectrumConfig spc;
+    ProjectConfigAdapter::to_spectrum_config(c, spc);
+    CHECK(spc.cqt_center_hz == 220.0f);
+    const ProjectFreqScale scales[] = {ProjectFreqScale::Linear, ProjectFreqScale::Logarithmic,
+                                       ProjectFreqScale::Mel, ProjectFreqScale::Bark,
+                                       ProjectFreqScale::Erb, ProjectFreqScale::Cqt};
+    const FrequencyScale expect[] = {FrequencyScale::Linear, FrequencyScale::Logarithmic,
+                                     FrequencyScale::Mel, FrequencyScale::Bark,
+                                     FrequencyScale::Erb, FrequencyScale::CQT};
+    for (int i = 0; i < 6; ++i) {
+        c.frequency_range.scale = scales[i];
+        ProjectConfigAdapter::to_spectrogram_config(c, sc);
+        CHECK(sc.freq_scale == expect[i]);
+    }
+}
+
+static void test_bridge_from_generate_config() {
+    std::fprintf(stderr, "[bridge_from_generate_config]\n");
+    GenerateConfig req;
+    req.input_path = "in.wav";
+    req.output_path = "out.png";
+    req.visualization = "spectrogram";
+    req.fft_size = 2048;
+    req.hop_size = 0;
+    req.window = "hamming";
+    req.db_range = 70.0f;
+    req.width = 640;
+    req.height = 480;
+    req.freq_scale = "mel";
+    req.cqt_center = 220.0f;
+    req.cqt_q = 24.0f;
+    DecodedMedia media;
+    media.file_path = "in.wav";
+    media.file_hash = "abc123";
+    media.file_size_bytes = 9999;
+    media.sample_rate = 48000;
+    media.num_channels = 2;
+    media.duration_seconds = 2.5;
+    media.codec_name = "pcm_s16le";
+    const ProjectConfig pc = make_project_config(req, media);
+    CHECK(pc.analysis.fft_size == 2048);
+    CHECK(pc.analysis.hop_size == 1024);
+    CHECK(pc.analysis.window_type == ProjectWindowType::Hamming);
+    CHECK(pc.analysis.sample_rate == 48000);
+    CHECK(pc.frequency_range.scale == ProjectFreqScale::Mel);
+    CHECK(pc.renderer.kind == RendererKind::Spectrogram);
+    CHECK(pc.renderer.cqt_center_hz == 220.0f);
+    CHECK(pc.dynamic_range.db_floor == -70.0f);
+    CHECK(pc.input.file_hash == "abc123");
+    CHECK(pc.input.num_channels == 2);
+    CHECK(pc.analysis.overlap_ratio == 0.5f);
+    std::vector<std::string> errs;
+    CHECK(pc.validate(errs));
+}
+
 int main() {
     test_default_validate();
     test_rejects_invalid_fft_size();
@@ -626,6 +776,12 @@ int main() {
     test_window_type_round_trip();
     test_color_map_round_trip();
     test_full_pipeline_reproducible();
+    test_strict_enums_reject_unknown();
+    test_analysis_method_version_round_trip();
+    test_analysis_fingerprint_taxonomy();
+    test_render_fingerprint_taxonomy();
+    test_adapter_cqt_and_scales();
+    test_bridge_from_generate_config();
 
     std::fprintf(stderr, "\n=== project_config: %d passed, %d failed ===\n",
                  g_pass, g_fail);

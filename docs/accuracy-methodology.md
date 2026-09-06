@@ -4,7 +4,7 @@ Full methodology: `tests/accuracy/ACCURACY_METHODOLOGY.md` (tolerances derived
 from DSP theory: 0.5-bin on-bin frequency, 2% amplitude, 0.5 dB power,
 1.0 dB magnitude).
 
-Measured in this release (24/24 ctest pass, Release build):
+Measured in this release (27/27 ctest pass, Release build):
 
 - DSP accuracy suite (`test_fft` incl. exact-bin peak + `dsp_accuracy`
   241 checks vs independent double DFT oracle): pass.

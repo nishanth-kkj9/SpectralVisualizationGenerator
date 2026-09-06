@@ -247,9 +247,9 @@ static void test_deterministic_data() {
 static void test_version_validation() {
     std::printf("\n[Test 5] Version validation\n");
 
-    EXPECT(SpectralDataset::current_version() == 2u, "current version is 2");
-    EXPECT(SpectralDataset::min_compatible_version() == 1u,
-           "min compatible version is 1");
+    EXPECT(SpectralDataset::current_version() == 3u, "current version is 3");
+    EXPECT(SpectralDataset::min_compatible_version() == 3u,
+           "only v3 loads (explicit LE layout)");
 
     SpectralDataset d = build_synthetic();
     std::vector<uint8_t> buf;
@@ -414,6 +414,343 @@ static void test_filters_and_stats() {
 }
 
 // ============================================================================
+// S5 — v3 explicit layout, reassigned arrays, determinism, invariants
+// ============================================================================
+
+// Independent LE blob writer (mirrors the documented format, shares no
+// code with production serialization): proves the format, not the writer.
+struct BlobW {
+    std::vector<uint8_t> b;
+    void u32(uint32_t v) {
+        b.push_back(static_cast<uint8_t>(v));
+        b.push_back(static_cast<uint8_t>(v >> 8));
+        b.push_back(static_cast<uint8_t>(v >> 16));
+        b.push_back(static_cast<uint8_t>(v >> 24));
+    }
+    void i32(int32_t v) { u32(static_cast<uint32_t>(v)); }
+    void u64(uint64_t v) {
+        for (int i = 0; i < 8; ++i) b.push_back(static_cast<uint8_t>(v >> (8 * i)));
+    }
+    void f32(float v) {
+        uint32_t u = 0;
+        std::memcpy(&u, &v, 4);
+        u32(u);
+    }
+    void f64(double v) {
+        uint64_t u = 0;
+        std::memcpy(&u, &v, 8);
+        u64(u);
+    }
+    void str(const std::string& s) {
+        u32(static_cast<uint32_t>(s.size()));
+        b.insert(b.end(), s.begin(), s.end());
+    }
+};
+
+static uint64_t test_fnv(const std::vector<uint8_t>& d, size_t off, size_t len) {
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (size_t i = 0; i < len; ++i) {
+        h ^= d[off + i];
+        h *= 0x100000001b3ULL;
+    }
+    return h;
+}
+
+// Minimal hand-built v3 blob: fft 8, hop 4, sr 8000, 2 frames, 5 bins.
+static std::vector<uint8_t> build_v3_fixture() {
+    BlobW p;
+    p.str("t.wav");
+    p.str("hash");
+    p.u64(100);
+    p.i32(8000);
+    p.i32(1);
+    p.f64(0.5);
+    p.str("pcm");
+    p.str("");
+    p.str("hann");
+    p.f32(0.5f);
+    p.i32(8);
+    p.i32(4);
+    p.f32(0.5f);
+    p.i32(8000);
+    p.i32(1);
+    p.i32(0);
+    p.f32(1.0f);
+    p.f32(0.0f);
+    p.f32(4000.0f);
+    p.i32(5);
+    p.f64(0.0005);
+    p.f64(0.001);
+    p.i32(2);
+    p.str("2");
+    p.str("stft");
+    p.i32(1);
+    p.f32(0.5f);
+    p.f32(0.375f);
+    p.f32(1.0f);
+    p.f32(1.0f);
+    p.f32(-90.0f);
+    p.f32(1.0f);
+    p.b.push_back(0);  // phase_unwrapped bool: exactly one byte
+    p.f32(0.0f);
+    p.b.push_back(0);  // channel_normalized bool: exactly one byte
+    p.i32(1);
+    p.i32(1);
+    p.i32(0);
+    p.b.push_back(0);  // channels_mixed bool: exactly one byte
+    p.u32(0);
+    BlobW ax;
+    ax.i32(5);
+    ax.i32(8);
+    ax.i32(8000);
+    ax.f32(4000.0f);
+    ax.f32(1000.0f);
+    ax.u64(5);
+    for (int k = 0; k < 5; ++k) ax.f32(static_cast<float>(k * 1000));
+    ax.i32(2);
+    ax.i32(4);
+    ax.i32(8000);
+    ax.f64(0.0005);
+    ax.f64(0.001);
+    ax.u64(2);
+    ax.f64(0.0);
+    ax.f64(0.0005);
+    BlobW fr;
+    fr.u64(2);
+    for (int f = 0; f < 2; ++f) {
+        fr.i32(f);
+        fr.i32(8);
+        fr.f32(0.5f);
+        fr.f64(f * 0.0005);
+        fr.f32(0.1f);
+        fr.f32(0.9f);
+        fr.f32(2000.0f);
+        fr.f32(10.0f);
+        fr.i32(1);
+        fr.u64(5);
+        for (int k = 0; k < 5; ++k) fr.f32(0.1f * (k + 1) + f);
+        fr.u64(5);
+        for (int k = 0; k < 5; ++k) fr.f32(0.01f * k);
+        fr.u64(5);
+        for (int k = 0; k < 5; ++k) fr.f32(0.01f * (k + 1) * (k + 1));
+        fr.u64(0);
+        fr.u64(0);
+    }
+    BlobW out;
+    out.u32(0x53504454);  // magic value; LE bytes on disk
+    out.u32(3);
+    out.u32(64);
+    const size_t pay = p.b.size() + ax.b.size() + fr.b.size();
+    out.u64(pay);
+    std::vector<uint8_t> payload;
+    payload.insert(payload.end(), p.b.begin(), p.b.end());
+    payload.insert(payload.end(), ax.b.begin(), ax.b.end());
+    payload.insert(payload.end(), fr.b.begin(), fr.b.end());
+    out.u64(test_fnv(payload, 0, payload.size()));
+    while (out.b.size() < 64) out.b.push_back(0);
+    out.b.insert(out.b.end(), payload.begin(), payload.end());
+    return out.b;
+}
+
+static void test_v3_explicit_layout() {
+    std::printf("\n[S5] v3 explicit layout\n");
+    SpectralDataset d = build_synthetic(256, 4, 16000);
+    std::vector<uint8_t> buf;
+    EXPECT(d.serialize_binary(buf), "serialize v3");
+    // Magic is the u32 value 0x53504454 in LE bytes (T,D,P,S on disk).
+    EXPECT(buf.size() >= 64 && buf[0] == 0x54 && buf[1] == 0x44 && buf[2] == 0x50 &&
+               buf[3] == 0x53,
+           "magic SPDT");
+    const uint32_t ver = static_cast<uint32_t>(buf[4]) |
+                         (static_cast<uint32_t>(buf[5]) << 8) |
+                         (static_cast<uint32_t>(buf[6]) << 16) |
+                         (static_cast<uint32_t>(buf[7]) << 24);
+    EXPECT(ver == 3u, "version field is 3 LE");
+    // v2-labeled blob must be rejected, not misparsed
+    std::vector<uint8_t> v2 = buf;
+    v2[4] = 2;
+    v2[5] = v2[6] = v2[7] = 0;
+    SpectralDataset d2;
+    EXPECT(!d2.deserialize_binary(v2.data(), v2.size()), "v2 blob rejected");
+    // bad magic rejected
+    std::vector<uint8_t> bad = buf;
+    bad[0] = 'X';
+    EXPECT(!d2.deserialize_binary(bad.data(), bad.size()), "bad magic rejected");
+}
+
+static void test_cross_platform_fixture() {
+    std::printf("\n[S5] cross-platform hand fixture\n");
+    const std::vector<uint8_t> blob = build_v3_fixture();
+    SpectralDataset d;
+    const bool loaded = d.deserialize_binary(blob.data(), blob.size());
+    EXPECT(loaded, "hand blob loads");
+    if (!loaded) return;  // never index an unloaded dataset
+    EXPECT(d.frame_count() == 2, "two frames");
+    EXPECT(d.num_frequency_bins() == 5, "five bins");
+    EXPECT(d.sample_rate() == 8000, "rate 8000");
+    EXPECT(d.frame(0).magnitudes[3] == 0.4f, "independent mag value");
+    EXPECT(d.frame(1).magnitudes[0] == 1.1f, "second frame offset");
+    EXPECT(d.frame(0).timestamp == 0.0, "first stamp");
+    EXPECT(d.source_metadata().file_hash == "hash", "hash field");
+    EXPECT(d.analysis_metadata().analysis_method == "stft", "method field");
+    auto v = d.validate();
+    EXPECT(!v.has_errors(), "hand fixture validates");
+}
+
+static void test_reassigned_roundtrip() {
+    std::printf("\n[S5] reassigned round trip\n");
+    SpectralDataset d = build_synthetic(256, 4, 16000);
+    // JSON path carries reassigned arrays (non-empty binary RT is covered
+    // by the live reassigned pipeline run in test_reproducibility).
+    const std::string js = d.serialize_json(false);
+    EXPECT(js.find("reassigned_times") != std::string::npos, "json emits reassigned");
+    SpectralDataset d2;
+    EXPECT(d2.deserialize_json(js), "json loads");
+    EXPECT(d2 == d, "json round trip equal");
+}
+
+static void test_corruption_battery() {
+    std::printf("\n[S5] corruption battery\n");
+    SpectralDataset d = build_synthetic(256, 4, 16000);
+    std::vector<uint8_t> buf;
+    EXPECT(d.serialize_binary(buf), "baseline serializes");
+    SpectralDataset x;
+    auto rejects = [&](std::vector<uint8_t> b, const char* msg) {
+        SpectralDataset t;
+        EXPECT(!t.deserialize_binary(b.data(), b.size()), msg);
+    };
+    rejects({}, "empty rejected");
+    rejects(std::vector<uint8_t>(buf.begin(), buf.begin() + 10), "truncated header rejected");
+    rejects(std::vector<uint8_t>(buf.begin(), buf.begin() + 100), "truncated metadata rejected");
+    {  // checksum flip
+        auto b = buf;
+        b[100] ^= 0xFF;
+        rejects(b, "checksum mismatch rejected");
+    }
+    {  // impossible frame count (u64 at offset 64+metasz...) — patch the
+        // frames-count field: find it by re-serializing a 0-frame dataset
+        // is overkill; instead corrupt the first frame-count u64 region by
+        // flipping bytes right after the fixed header+small metadata is
+        // fragile. Use version bump instead (future version path):
+        auto b = buf;
+        b[4] = 9;
+        rejects(b, "future version rejected");
+    }
+    {  // huge string length in first field
+        auto b = buf;
+        // file_path length lives at offset 64 (u32 LE)
+        b[64] = 0xFF;
+        b[65] = 0xFF;
+        b[66] = 0xFF;
+        b[67] = 0xFF;
+        rejects(b, "oversize string rejected");
+    }
+    {  // bool byte > 1 must be rejected (not read as true): flip the
+        // channels_mixed byte of the hand fixture (payload offset 184),
+        // re-stamp the checksum so only the bool rule can fire.
+        const std::vector<uint8_t> good = build_v3_fixture();
+        std::vector<uint8_t> b = good;
+        b[64 + 184] = 2;
+        const uint64_t cs = test_fnv(b, 64, b.size() - 64);
+        for (int i = 0; i < 8; ++i)
+            b[20 + i] = static_cast<uint8_t>(cs >> (8 * i));
+        SpectralDataset t;
+        EXPECT(!t.deserialize_binary(b.data(), b.size()), "bool > 1 rejected");
+    }
+}
+
+static void test_determinism_identity() {
+    std::printf("\n[S5] determinism + identity\n");
+    SpectralDataset d = build_synthetic(256, 4, 16000);
+    std::vector<uint8_t> a, b;
+    EXPECT(d.serialize_binary(a), "serialize a");
+    EXPECT(d.serialize_binary(b), "serialize b");
+    EXPECT(a == b, "same dataset -> same bytes");
+    const std::string id1 = d.dataset_identity();
+    EXPECT(id1.size() == 64, "identity is 64 hex chars");
+    SpectralDataset d2;
+    EXPECT(d2.deserialize_binary(a.data(), a.size()), "reload");
+    EXPECT(d2.dataset_identity() == id1, "identity stable across reload");
+    EXPECT(d2 == d, "semantic equality");
+    d2.mutable_analysis_metadata().hop_size = 999;
+    EXPECT(d2.dataset_identity() != id1, "mutation moves identity");
+}
+
+static void test_metadata_invariants() {
+    std::printf("\n[S5] metadata invariants\n");
+    SpectralDataset d = build_synthetic(1024, 8, 44100);
+    auto v = d.validate();
+    EXPECT(!v.has_errors(), "synthetic validates clean");
+    // timestamp == index*hop/sr
+    bool ts = true;
+    for (int i = 0; i < d.frame_count(); ++i) {
+        double expect = static_cast<double>(i) * 512 / 44100.0;
+        if (std::fabs(d.frame(i).timestamp - expect) > 1e-9 * (expect + 1.0)) ts = false;
+    }
+    EXPECT(ts, "timestamps equal index*hop/rate");
+    // break one invariant at a time
+    {
+        SpectralDataset bad = d;
+        bad.mutable_frequency_axis().bin_frequencies[10] = -5.0f;
+        EXPECT(bad.validate().has_errors(), "negative bin rejected");
+    }
+    {
+        SpectralDataset bad = d;
+        bad.mutable_frequency_axis().bin_frequencies[10] = 1e9f;
+        EXPECT(bad.validate().has_errors(), "off-formula bin rejected");
+    }
+    {
+        SpectralDataset bad = d;
+        SpectralFrame f;
+        bad.get_frame(0, f);
+        f.power.resize(3);
+        // replace frame 0 via clear/re-add path is API-limited; validate the
+        // strict power-size rule through a hand-built small dataset instead
+        (void)f;
+        SpectralDataset small;
+        small.mutable_analysis_metadata().fft_size = 8;
+        small.mutable_analysis_metadata().hop_size = 4;
+        small.mutable_analysis_metadata().sample_rate = 8000;
+        small.mutable_analysis_metadata().num_frequency_bins = 5;
+        small.mutable_frequency_axis() = FrequencyAxis(8, 8000);
+        small.mutable_time_axis() = TimeAxis(1, 4, 8000);
+        SpectralFrame sf;
+        sf.frame_index = 0;
+        sf.n_fft = 8;
+        sf.timestamp = 0.0;
+        sf.magnitudes.assign(5, 0.1f);
+        sf.phases.assign(5, 0.0f);
+        sf.power.assign(3, 0.01f);  // wrong size on purpose
+        small.add_frame(sf);
+        EXPECT(small.validate().has_errors(), "short power rejected");
+    }
+    {
+        SpectralDataset bad = d;
+        bad.mutable_analysis_metadata().sample_rate = 8000;  // axis still 44100
+        EXPECT(bad.validate().has_errors(), "rate/axis mismatch rejected");
+    }
+    {
+        // NaN magnitudes load fine (any f32 decodes) but never validate.
+        SpectralDataset bad;
+        bad.mutable_analysis_metadata().fft_size = 8;
+        bad.mutable_analysis_metadata().hop_size = 4;
+        bad.mutable_analysis_metadata().sample_rate = 8000;
+        bad.mutable_analysis_metadata().num_frequency_bins = 5;
+        bad.mutable_frequency_axis() = FrequencyAxis(8, 8000);
+        bad.mutable_time_axis() = TimeAxis(1, 4, 8000);
+        SpectralFrame sf;
+        sf.frame_index = 0;
+        sf.n_fft = 8;
+        sf.magnitudes.assign(5, 0.1f);
+        sf.magnitudes[2] = std::numeric_limits<float>::quiet_NaN();
+        sf.phases.assign(5, 0.0f);
+        sf.power.assign(5, 0.01f);
+        bad.add_frame(sf);
+        EXPECT(bad.validate().has_errors(), "NaN magnitude rejected");
+    }
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 int main() {
@@ -427,6 +764,12 @@ int main() {
     test_file_io();
     test_validation_catches_inconsistencies();
     test_filters_and_stats();
+    test_v3_explicit_layout();
+    test_cross_platform_fixture();
+    test_reassigned_roundtrip();
+    test_corruption_battery();
+    test_determinism_identity();
+    test_metadata_invariants();
 
     std::printf("\n=== Summary ===\n");
     std::printf("Passed: %d\n", g_pass);

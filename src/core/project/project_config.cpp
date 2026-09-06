@@ -402,29 +402,69 @@ const char* window_type_name(ProjectWindowType w) {
     }
     return "hann";
 }
+bool try_parse_window_type(const std::string& s, ProjectWindowType& out) {
+    if (s == "rectangular") { out = ProjectWindowType::Rectangular; return true; }
+    if (s == "hamming")     { out = ProjectWindowType::Hamming;     return true; }
+    if (s == "blackman")    { out = ProjectWindowType::Blackman;    return true; }
+    if (s == "hann")        { out = ProjectWindowType::Hann;        return true; }
+    return false;
+}
 ProjectWindowType parse_window_type(const std::string& s) {
-    if (s == "rectangular") return ProjectWindowType::Rectangular;
-    if (s == "hamming")     return ProjectWindowType::Hamming;
-    if (s == "blackman")    return ProjectWindowType::Blackman;
-    return ProjectWindowType::Hann;
+    ProjectWindowType w;
+    return try_parse_window_type(s, w) ? w : ProjectWindowType::Hann;
 }
 const char* renderer_kind_name(RendererKind k) {
     return k == RendererKind::Spectrogram ? "spectrogram" : "spectrum";
 }
+bool try_parse_renderer_kind(const std::string& s, RendererKind& out) {
+    if (s == "spectrogram") { out = RendererKind::Spectrogram; return true; }
+    if (s == "spectrum")    { out = RendererKind::Spectrum;    return true; }
+    return false;
+}
 RendererKind parse_renderer_kind(const std::string& s) {
-    return s == "spectrogram" ? RendererKind::Spectrogram : RendererKind::Spectrum;
+    RendererKind k;
+    return try_parse_renderer_kind(s, k) ? k : RendererKind::Spectrum;
 }
 const char* freq_scale_name(ProjectFreqScale s) {
-    return s == ProjectFreqScale::Linear ? "linear" : "logarithmic";
+    switch (s) {
+        case ProjectFreqScale::Linear:      return "linear";
+        case ProjectFreqScale::Logarithmic: return "logarithmic";
+        case ProjectFreqScale::Mel:         return "mel";
+        case ProjectFreqScale::Bark:        return "bark";
+        case ProjectFreqScale::Erb:         return "erb";
+        case ProjectFreqScale::Cqt:         return "cqt";
+    }
+    return "logarithmic";
+}
+bool try_parse_freq_scale(const std::string& s, ProjectFreqScale& out) {
+    if (s == "linear")      { out = ProjectFreqScale::Linear;      return true; }
+    if (s == "logarithmic") { out = ProjectFreqScale::Logarithmic; return true; }
+    if (s == "mel")         { out = ProjectFreqScale::Mel;         return true; }
+    if (s == "bark")        { out = ProjectFreqScale::Bark;        return true; }
+    if (s == "erb")         { out = ProjectFreqScale::Erb;         return true; }
+    if (s == "cqt")         { out = ProjectFreqScale::Cqt;         return true; }
+    return false;
 }
 ProjectFreqScale parse_freq_scale(const std::string& s) {
-    return s == "linear" ? ProjectFreqScale::Linear : ProjectFreqScale::Logarithmic;
+    ProjectFreqScale f;
+    return try_parse_freq_scale(s, f) ? f : ProjectFreqScale::Logarithmic;
 }
 const char* color_map_name(ProjectColorMap m) {
     return m == ProjectColorMap::Heat ? "heat" : "viridis";
 }
+bool try_parse_color_map(const std::string& s, ProjectColorMap& out) {
+    if (s == "heat")    { out = ProjectColorMap::Heat;    return true; }
+    if (s == "viridis") { out = ProjectColorMap::Viridis; return true; }
+    return false;
+}
 ProjectColorMap parse_color_map(const std::string& s) {
-    return s == "heat" ? ProjectColorMap::Heat : ProjectColorMap::Viridis;
+    ProjectColorMap m;
+    return try_parse_color_map(s, m) ? m : ProjectColorMap::Viridis;
+}
+bool try_parse_reproducibility_tier(const std::string& s, ReproducibilityTier& out) {
+    if (s == "spectral_image_not_video") { out = ReproducibilityTier::Spectral_Image_NotVideo; return true; }
+    if (s == "none") { out = ReproducibilityTier::None; return true; }
+    return false;
 }
 const char* reproducibility_tier_name(ReproducibilityTier t) {
     switch (t) {
@@ -444,11 +484,38 @@ bool ProjectConfig::validate(std::vector<std::string>& errors) const {
     if (schema_version < PROJECT_CONFIG_MIN_COMPATIBLE_VERSION) {
         errors.push_back("schema_version is older than the minimum compatible version");
     }
-    if (analysis.fft_size <= 0 || (analysis.fft_size & (analysis.fft_size - 1)) != 0) {
-        errors.push_back("analysis.fft_size must be a positive power of two");
+    if (schema_version > PROJECT_CONFIG_SCHEMA_VERSION) {
+        errors.push_back("schema_version is newer than this software supports");
+    }
+    // Canonical configs carry no defaults: fft/hop follow the same contract
+    // as GenerateConfig (pow2 >= 2, hop in (0, fft]).
+    if (analysis.fft_size < 2 || (analysis.fft_size & (analysis.fft_size - 1)) != 0) {
+        errors.push_back("analysis.fft_size must be a power of two >= 2");
     }
     if (analysis.hop_size <= 0 || analysis.hop_size > analysis.fft_size) {
         errors.push_back("analysis.hop_size must be in (0, fft_size]");
+    }
+    if (analysis.window_type != ProjectWindowType::Rectangular &&
+        analysis.window_type != ProjectWindowType::Hann &&
+        analysis.window_type != ProjectWindowType::Hamming &&
+        analysis.window_type != ProjectWindowType::Blackman) {
+        errors.push_back("analysis.window_type is not a known window");
+    }
+    if (analysis.analysis_method.empty()) {
+        errors.push_back("analysis.analysis_method must be non-empty");
+    }
+    if (analysis.analysis_version == 0) {
+        errors.push_back("analysis.analysis_version must be > 0");
+    }
+    if (analysis.analyzed_channels < 0 || analysis.channel_mapping < 0) {
+        errors.push_back("analysis channel counts must be >= 0");
+    }
+    if (input.num_channels < 0) {
+        errors.push_back("input.num_channels must be >= 0");
+    }
+    if (reproducibility_tier != ReproducibilityTier::Spectral_Image_NotVideo &&
+        reproducibility_tier != ReproducibilityTier::None) {
+        errors.push_back("reproducibility_tier is not a known tier");
     }
     if (analysis.overlap_ratio < 0.0f || analysis.overlap_ratio >= 1.0f) {
         errors.push_back("analysis.overlap_ratio must be in [0, 1)");
@@ -468,6 +535,9 @@ bool ProjectConfig::validate(std::vector<std::string>& errors) const {
     if (frequency_range.max_hz < 0.0f) {
         errors.push_back("frequency_range.max_hz must be >= 0");
     }
+    if (frequency_range.max_hz > 0.0f && frequency_range.min_hz >= frequency_range.max_hz) {
+        errors.push_back("frequency_range.min_hz must be below max_hz");
+    }
     if (renderer.width <= 0 || renderer.height <= 0) {
         errors.push_back("renderer.width/height must be positive");
     }
@@ -482,6 +552,37 @@ bool ProjectConfig::validate(std::vector<std::string>& errors) const {
 
 std::string ProjectConfig::fingerprint() const {
     return Sha256::hash(ProjectConfigSerializer::to_json(*this));
+}
+
+std::string sha256_hex(const uint8_t* data, size_t size) {
+    Sha256 h;
+    h.update(data, size);
+    return h.finish();
+}
+
+std::string sha256_hex(const std::string& s) {
+    return Sha256::hash(s);
+}
+
+bool sha256_file(const std::string& path, std::string& out_hex, std::string& error) {
+    std::ifstream f(path, std::ios::in | std::ios::binary);
+    if (!f.is_open()) {
+        error = "cannot open " + path + " for hashing";
+        return false;
+    }
+    Sha256 h;
+    std::vector<uint8_t> buf(1 << 20);
+    while (f.good()) {
+        f.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(buf.size()));
+        const std::streamsize n = f.gcount();
+        if (n > 0) h.update(buf.data(), static_cast<size_t>(n));
+    }
+    if (f.bad()) {
+        error = "read failed while hashing " + path;
+        return false;
+    }
+    out_hex = h.finish();
+    return true;
 }
 
 // ============================================================================
@@ -505,6 +606,8 @@ void emit_input(const ProjectInput& in, std::vector<KV>& kvs) {
     kvs.push_back({"sample_rate",         fmt_int(in.sample_rate)});
 }
 void emit_analysis(const ProjectAnalysis& a, std::vector<KV>& kvs) {
+    kvs.push_back({"analysis_method",     json_escape(a.analysis_method)});
+    kvs.push_back({"analysis_version",    fmt_uint(a.analysis_version)});
     kvs.push_back({"analyzed_channels",   fmt_int(a.analyzed_channels)});
     kvs.push_back({"channel_mapping",     fmt_int(a.channel_mapping)});
     kvs.push_back({"fft_size",            fmt_int(a.fft_size)});
@@ -529,6 +632,8 @@ void emit_frequency_range(const ProjectFrequencyRange& f, std::vector<KV>& kvs) 
 }
 void emit_renderer(const ProjectRenderer& r, std::vector<KV>& kvs) {
     kvs.push_back({"color_map",       json_escape(color_map_name(r.color_map))});
+    kvs.push_back({"cqt_center_hz",     fmt_float(r.cqt_center_hz)});
+    kvs.push_back({"cqt_q",             fmt_float(r.cqt_q)});
     kvs.push_back({"dpi",             fmt_int(r.dpi)});
     kvs.push_back({"draw_grid",       r.draw_grid ? "true" : "false"});
     kvs.push_back({"draw_labels",     r.draw_labels ? "true" : "false"});
@@ -704,7 +809,16 @@ bool ProjectConfigSerializer::from_json(const std::string& json, ProjectConfig& 
         if (get("analysis.phase_unwrap", e))        out.analysis.phase_unwrap = expect_f(e);
         if (get("analysis.sample_rate", e))         out.analysis.sample_rate = expect_i(e);
         if (get("analysis.window_coherent_gain",e)) out.analysis.window_coherent_gain = expect_f(e);
-        if (get("analysis.window_type", e))         out.analysis.window_type = parse_window_type(expect_str(e, "analysis.window_type"));
+        if (get("analysis.window_type", e)) {
+            ProjectWindowType w;
+            if (!try_parse_window_type(expect_str(e, "analysis.window_type"), w)) {
+                error = "unknown analysis.window_type";
+                return false;
+            }
+            out.analysis.window_type = w;
+        }
+        if (get("analysis.analysis_method", e))  out.analysis.analysis_method = expect_str(e, "analysis.analysis_method");
+        if (get("analysis.analysis_version", e)) out.analysis.analysis_version = static_cast<uint32_t>(expect_u64(e));
     }
     // dynamic_range.*
     {
@@ -719,19 +833,42 @@ bool ProjectConfigSerializer::from_json(const std::string& json, ProjectConfig& 
         const JEntry* e;
         if (get("frequency_range.max_hz", e))  out.frequency_range.max_hz = expect_f(e);
         if (get("frequency_range.min_hz", e))  out.frequency_range.min_hz = expect_f(e);
-        if (get("frequency_range.scale", e))   out.frequency_range.scale = parse_freq_scale(expect_str(e, "frequency_range.scale"));
+        if (get("frequency_range.scale", e)) {
+            ProjectFreqScale s;
+            if (!try_parse_freq_scale(expect_str(e, "frequency_range.scale"), s)) {
+                error = "unknown frequency_range.scale";
+                return false;
+            }
+            out.frequency_range.scale = s;
+        }
     }
     // renderer.*
     {
         const JEntry* e;
-        if (get("renderer.color_map", e))         out.renderer.color_map = parse_color_map(expect_str(e, "renderer.color_map"));
+        if (get("renderer.cqt_center_hz", e)) out.renderer.cqt_center_hz = expect_f(e);
+        if (get("renderer.cqt_q", e))         out.renderer.cqt_q = expect_f(e);
+        if (get("renderer.color_map", e)) {
+            ProjectColorMap m;
+            if (!try_parse_color_map(expect_str(e, "renderer.color_map"), m)) {
+                error = "unknown renderer.color_map";
+                return false;
+            }
+            out.renderer.color_map = m;
+        }
         if (get("renderer.dpi", e))               out.renderer.dpi = expect_i(e);
         if (get("renderer.draw_grid", e))         out.renderer.draw_grid = expect_b(e);
         if (get("renderer.draw_labels", e))       out.renderer.draw_labels = expect_b(e);
         if (get("renderer.grid_divisions_x", e))  out.renderer.grid_divisions_x = expect_i(e);
         if (get("renderer.grid_divisions_y", e))  out.renderer.grid_divisions_y = expect_i(e);
         if (get("renderer.height", e))            out.renderer.height = expect_i(e);
-        if (get("renderer.kind", e))              out.renderer.kind = parse_renderer_kind(expect_str(e, "renderer.kind"));
+        if (get("renderer.kind", e)) {
+            RendererKind k;
+            if (!try_parse_renderer_kind(expect_str(e, "renderer.kind"), k)) {
+                error = "unknown renderer.kind";
+                return false;
+            }
+            out.renderer.kind = k;
+        }
         if (get("renderer.line_thickness", e))    out.renderer.line_thickness = expect_i(e);
         if (get("renderer.width", e))             out.renderer.width = expect_i(e);
     }
@@ -742,9 +879,12 @@ bool ProjectConfigSerializer::from_json(const std::string& json, ProjectConfig& 
         if (get("notes", e))        out.notes = expect_str(e, "notes");
         if (get("project_id", e))   out.project_id = expect_str(e, "project_id");
         if (get("reproducibility_tier", e)) {
-            std::string t = expect_str(e, "reproducibility_tier");
-            if      (t == "spectral_image_not_video") out.reproducibility_tier = ReproducibilityTier::Spectral_Image_NotVideo;
-            else if (t == "none")                      out.reproducibility_tier = ReproducibilityTier::None;
+            ReproducibilityTier t;
+            if (!try_parse_reproducibility_tier(expect_str(e, "reproducibility_tier"), t)) {
+                error = "unknown reproducibility_tier";
+                return false;
+            }
+            out.reproducibility_tier = t;
         }
         if (get("schema_version", e))   out.schema_version = static_cast<uint32_t>(expect_u64(e));
         if (get("software_name", e))    out.software_name = expect_str(e, "software_name");
@@ -794,6 +934,64 @@ bool ProjectConfigSerializer::load(const std::string& path, ProjectConfig& out,
     return from_json(ss.str(), out, error, allow_unknown);
 }
 
+// Canonical subset: input content identity + everything that can change
+// the analytical result. Informational fields (notes, project_id,
+// created_utc, renderer, software_*, schema_version, tier) do not move it.
+std::string ProjectConfig::analysis_fingerprint() const {
+    std::vector<KV> top;
+    {
+        std::vector<KV> v;
+        v.push_back({"file_hash", json_escape(input.file_hash)});
+        v.push_back({"file_size_bytes", fmt_uint(input.file_size_bytes)});
+        std::string inner;
+        emit_object(inner, 0, false, v);
+        top.push_back({"input", std::move(inner)});
+    }
+    {
+        std::vector<KV> v;
+        emit_analysis(analysis, v);
+        std::string inner;
+        emit_object(inner, 0, false, v);
+        top.push_back({"analysis", std::move(inner)});
+    }
+    std::sort(top.begin(), top.end(),
+              [](const KV& a, const KV& b) { return a.first < b.first; });
+    std::string out;
+    emit_object(out, 0, false, top);
+    return Sha256::hash(out);
+}
+
+std::string ProjectConfig::render_fingerprint(const std::string& dataset_identity) const {
+    std::vector<KV> top;
+    top.push_back({"dataset", json_escape(dataset_identity)});
+    {
+        std::vector<KV> v;
+        emit_dynamic_range(dynamic_range, v);
+        std::string inner;
+        emit_object(inner, 0, false, v);
+        top.push_back({"dynamic_range", std::move(inner)});
+    }
+    {
+        std::vector<KV> v;
+        emit_frequency_range(frequency_range, v);
+        std::string inner;
+        emit_object(inner, 0, false, v);
+        top.push_back({"frequency_range", std::move(inner)});
+    }
+    {
+        std::vector<KV> v;
+        emit_renderer(renderer, v);
+        std::string inner;
+        emit_object(inner, 0, false, v);
+        top.push_back({"renderer", std::move(inner)});
+    }
+    std::sort(top.begin(), top.end(),
+              [](const KV& a, const KV& b) { return a.first < b.first; });
+    std::string out;
+    emit_object(out, 0, false, top);
+    return Sha256::hash(out);
+}
+
 // ============================================================================
 // Adapter
 // ============================================================================
@@ -815,11 +1013,22 @@ void ProjectConfigAdapter::to_analysis_metadata(const ProjectConfig& cfg, Analys
     out.analyzer_version = cfg.software_version;
 }
 
+static FrequencyScale adapt_scale(ProjectFreqScale s) {
+    switch (s) {
+        case ProjectFreqScale::Linear:      return FrequencyScale::Linear;
+        case ProjectFreqScale::Logarithmic: return FrequencyScale::Logarithmic;
+        case ProjectFreqScale::Mel:         return FrequencyScale::Mel;
+        case ProjectFreqScale::Bark:        return FrequencyScale::Bark;
+        case ProjectFreqScale::Erb:         return FrequencyScale::Erb;
+        case ProjectFreqScale::Cqt:         return FrequencyScale::CQT;
+    }
+    return FrequencyScale::Logarithmic;
+}
+
 void ProjectConfigAdapter::to_spectrum_config(const ProjectConfig& cfg, SpectrumConfig& out) {
     out.width = cfg.renderer.width;
     out.height = cfg.renderer.height;
-    out.freq_scale = (cfg.frequency_range.scale == ProjectFreqScale::Linear)
-                     ? FrequencyScale::Linear : FrequencyScale::Logarithmic;
+    out.freq_scale = adapt_scale(cfg.frequency_range.scale);
     out.freq_min_hz = cfg.frequency_range.min_hz;
     out.freq_max_hz = cfg.frequency_range.max_hz;
     out.y_scale = SpectrumScale::Decibels;
@@ -835,6 +1044,8 @@ void ProjectConfigAdapter::to_spectrum_config(const ProjectConfig& cfg, Spectrum
     out.line_thickness = cfg.renderer.line_thickness;
     out.grid_divisions_x = cfg.renderer.grid_divisions_x;
     out.grid_divisions_y = cfg.renderer.grid_divisions_y;
+    out.cqt_center_hz = cfg.renderer.cqt_center_hz;
+    out.cqt_q = cfg.renderer.cqt_q;
     out.seed = 0;
 }
 
@@ -843,13 +1054,14 @@ void ProjectConfigAdapter::to_spectrogram_config(const ProjectConfig& cfg, Spect
     out.height = cfg.renderer.height;
     out.color_map = (cfg.renderer.color_map == ProjectColorMap::Heat)
                     ? ColorMap::Heat : ColorMap::Viridis;
-    out.freq_scale = (cfg.frequency_range.scale == ProjectFreqScale::Linear)
-                     ? FrequencyScale::Linear : FrequencyScale::Logarithmic;
+    out.freq_scale = adapt_scale(cfg.frequency_range.scale);
     out.interpolation = Interpolation::Bilinear;
     out.db_floor = cfg.dynamic_range.db_floor;
     out.db_ceiling = cfg.dynamic_range.db_ceiling;
     out.freq_min_hz = cfg.frequency_range.min_hz;
     out.freq_max_hz = cfg.frequency_range.max_hz;
+    out.cqt_center_hz = cfg.renderer.cqt_center_hz;
+    out.cqt_q = cfg.renderer.cqt_q;
     out.seed = 0;
 }
 

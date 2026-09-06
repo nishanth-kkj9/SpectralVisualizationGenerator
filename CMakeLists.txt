@@ -624,6 +624,17 @@ set_target_properties(test_config_validation PROPERTIES
 )
 add_test(NAME config_validation COMMAND test_config_validation)
 
+add_executable(test_reproducibility
+    tests/cli/test_reproducibility.cpp
+)
+target_link_libraries(test_reproducibility PRIVATE SpectralCore)
+set_target_properties(test_reproducibility PROPERTIES
+    CXX_VISIBILITY_PRESET "hidden"
+    CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
+    WIN32_EXECUTABLE OFF
+)
+add_test(NAME reproducibility COMMAND test_reproducibility)
+
 if(DEFINED ENV{VCPKG_ROOT})
     set(CMAKE_TOOLCHAIN_FILE "${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
     list(APPEND CMAKE_PREFIX_PATH "${VCPKG_ROOT}/installed")

@@ -57,7 +57,7 @@ std::string validate_config(const GenerateConfig& cfg) {
     return "";
 }
 
-static FrequencyScale parse_freq_scale(const std::string& s) {
+static FrequencyScale parse_video_freq_scale(const std::string& s) {
     if (s == "mel")    return FrequencyScale::Mel;
     if (s == "bark")   return FrequencyScale::Bark;
     if (s == "erb")    return FrequencyScale::Erb;
@@ -66,14 +66,62 @@ static FrequencyScale parse_freq_scale(const std::string& s) {
     return FrequencyScale::Logarithmic;
 }
 
-// Fail-closed: unknown names yield an empty window, which stft_frame
-// rejects. Unreachable via validate_config, but no silent Hann fallback.
-static std::vector<float> make_window(const std::string& type, int n) {
-    if (type == "hamming")     return window_hamming(n);
-    if (type == "blackman")    return window_blackman(n);
-    if (type == "rectangular") return window_rectangular(n);
-    if (type == "hann")        return window_hann(n);
-    return {};
+// Canonical window vector from the canonical enum (single source for
+// both analysis and recorded gains). No string fallback anywhere.
+static std::vector<float> window_for(ProjectWindowType w, int n) {
+    switch (w) {
+        case ProjectWindowType::Hamming:     return window_hamming(n);
+        case ProjectWindowType::Blackman:    return window_blackman(n);
+        case ProjectWindowType::Rectangular: return window_rectangular(n);
+        case ProjectWindowType::Hann:        return window_hann(n);
+    }
+    return window_hann(n);
+}
+
+static const char* channel_name_for(int ch) {
+    static const char* names[] = {"L", "R", "C", "LFE", "SL", "SR", "BL", "BR"};
+    return (ch >= 0 && ch < 8) ? names[ch] : "?";
+}
+
+ProjectConfig make_project_config(const GenerateConfig& cfg, const DecodedMedia& media) {
+    ProjectConfig pc;
+    const int hop = cfg.hop_size == 0 ? cfg.fft_size / 2 : cfg.hop_size;
+    pc.input.file_path = media.file_path;
+    pc.input.file_hash = media.file_hash;
+    pc.input.file_size_bytes = media.file_size_bytes;
+    pc.input.sample_rate = media.sample_rate;
+    pc.input.num_channels = media.num_channels;
+    pc.input.duration_seconds = media.duration_seconds;
+    pc.input.codec_name = media.codec_name;
+    ProjectWindowType wt = ProjectWindowType::Hann;
+    try_parse_window_type(cfg.window, wt);  // validated upstream
+    pc.analysis.window_type = wt;
+    const auto win = window_for(wt, cfg.fft_size);
+    pc.analysis.window_coherent_gain =
+        win.empty() ? 0.5f : window_coherent_gain(win);
+    pc.analysis.fft_size = cfg.fft_size;
+    pc.analysis.hop_size = hop;
+    pc.analysis.overlap_ratio =
+        cfg.fft_size > 0 ? 1.0f - static_cast<float>(hop) / cfg.fft_size : 0.5f;
+    pc.analysis.sample_rate = media.sample_rate;
+    pc.analysis.analyzed_channels = 1;
+    pc.analysis.channel_mapping = 0;
+    pc.dynamic_range.db_floor = -cfg.db_range;
+    pc.dynamic_range.db_ceiling = 0.0f;
+    pc.dynamic_range.window_energy_gain =
+        win.empty() ? 0.0f : window_energy_gain(win);
+    pc.frequency_range.min_hz = cfg.min_freq;
+    pc.frequency_range.max_hz = cfg.max_freq;
+    ProjectFreqScale sc = ProjectFreqScale::Logarithmic;
+    try_parse_freq_scale(cfg.freq_scale, sc);  // unknown keeps Logarithmic, as before
+    pc.frequency_range.scale = sc;
+    pc.renderer.kind = (cfg.visualization == "spectrogram") ? RendererKind::Spectrogram
+                                                              : RendererKind::Spectrum;
+    pc.renderer.width = cfg.width;
+    pc.renderer.height = cfg.height;
+    pc.renderer.cqt_center_hz = cfg.cqt_center;
+    pc.renderer.cqt_q = cfg.cqt_q;
+    return pc;
 }
 
 Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
@@ -82,7 +130,7 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
     const std::string cfg_err = validate_config(cfg);
     if (!cfg_err.empty())
         return Error::make(Subsystem::Pipeline, JobError::BadConfig, "config: " + cfg_err);
-    if (cfg.hop_size == 0) cfg.hop_size = cfg.fft_size / 2;
+    // Hop defaulting lives in make_project_config (single site).
 
     report(progress, 0.0f, "decode");
     MediaDecoder decoder;
@@ -114,6 +162,9 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
     }
     const bool decode_failed = decoder.failed();
     const std::string decode_err = decoder.last_error();
+    const int native_ch = decoder.num_channels();
+    const std::string codec = decoder.codec_name();
+    const double dec_duration = decoder.duration();
     decoder.close();
     // A failed decode is never a silent success, even with partial audio.
     if (decode_failed) {
@@ -126,30 +177,59 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
         return Error::make(Subsystem::Media, JobError::DecodeError,
                            "media: decoded 0 audio samples from '" + cfg.input_path + "'");
 
-    // STFT
+    // Content identity: one chunked hash per job. Same bytes under any
+    // path hash identically; the hash (not the path) feeds the dataset.
+    std::string content_hash, hash_err;
+    uint64_t content_size = 0;
+    {
+        std::error_code fec;
+        content_size = fs::file_size(cfg.input_path, fec);
+    }
+    if (!sha256_file(cfg.input_path, content_hash, hash_err))
+        return Error::make(Subsystem::Media, JobError::DecodeError,
+                           "media: cannot hash '" + cfg.input_path + "': " + hash_err);
+    DecodedMedia media;
+    media.file_path = cfg.input_path;
+    media.file_hash = content_hash;
+    media.file_size_bytes = content_size;
+    media.sample_rate = sr;
+    media.num_channels = native_ch;
+    media.duration_seconds = dec_duration;
+    media.codec_name = codec;
+    const ProjectConfig pc = make_project_config(cfg, media);
+    {
+        std::vector<std::string> verr;
+        if (!pc.validate(verr))
+            return Error::make(Subsystem::Pipeline, JobError::BadConfig,
+                               "config: " + (verr.empty() ? "invalid" : verr[0]));
+    }
+
+    // STFT (parameters from the canonical config, not parallel locals).
     report(progress, 0.1f, "analyze");
-    dataset.mutable_frequency_axis() = FrequencyAxis(cfg.fft_size, sr);
-    std::vector<float> win = make_window(cfg.window, cfg.fft_size);
-    float cg = window_coherent_gain(win);
-    const int num_bins = cfg.fft_size / 2 + 1;
+    const int fft_n = pc.analysis.fft_size;
+    const int hop_n = pc.analysis.hop_size;
+    dataset.mutable_frequency_axis() = FrequencyAxis(fft_n, sr);
+    std::vector<float> win = window_for(pc.analysis.window_type, fft_n);
+    float cg = pc.analysis.window_coherent_gain;
+    const int num_bins = fft_n / 2 + 1;
     const int total = static_cast<int>(audio.size());
-    const int n_frames = (total - cfg.fft_size) / cfg.hop_size + 1;
+    const int n_frames = (total - fft_n) / hop_n + 1;
     if (n_frames <= 0)
         return Error::make(Subsystem::Dsp, JobError::AnalysisError,
-                           "dsp: input too short for fft_size=" + std::to_string(cfg.fft_size));
+                           "dsp: input too short for fft_size=" + std::to_string(fft_n));
 
     int frame_idx = 0;
-    for (int start = 0; start + cfg.fft_size <= total; start += cfg.hop_size) {
+    for (int start = 0; start + fft_n <= total; start += hop_n) {
         // Authoritative STFT: amplitude-corrected one-sided magnitudes.
         StftFrame fr;
-        if (!stft_frame(audio.data(), total, start, cfg.fft_size, sr, win, cg, fr))
+        if (!stft_frame(audio.data(), total, start, fft_n, sr, win, cg, fr))
             return Error::make(Subsystem::Dsp, JobError::AnalysisError,
                                "dsp: stft frame failed at sample " + std::to_string(start));
         std::vector<complex_f>& buf = fr.spectrum;
 
         SpectralFrame sf;
         sf.frame_index = frame_idx;
-        sf.n_fft = cfg.fft_size;
+        sf.n_fft = fft_n;
         sf.window_factor = cg;
         sf.timestamp = fr.timestamp;
         sf.magnitudes = std::move(fr.magnitudes);
@@ -161,7 +241,7 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
             float mag = sf.magnitudes[static_cast<size_t>(k)];
             sum_sq += mag * mag;
             if (mag > peak) peak = mag;
-            float freq = static_cast<float>(k) * static_cast<float>(sr) / static_cast<float>(cfg.fft_size);
+            float freq = static_cast<float>(k) * static_cast<float>(sr) / static_cast<float>(fft_n);
             cn += freq * mag;
             cd += mag;
         }
@@ -170,20 +250,20 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
         sf.spectral_centroid = (cd > 0.0f) ? cn / cd : 0.0f;
 
         if (cfg.reassigned) {
-            std::vector<complex_f> X_tau(static_cast<size_t>(cfg.fft_size));
-            for (int j = 0; j < cfg.fft_size; ++j)
+            std::vector<complex_f> X_tau(static_cast<size_t>(fft_n));
+            for (int j = 0; j < fft_n; ++j)
                 X_tau[static_cast<size_t>(j)] = complex_f(
                     static_cast<float>(j) * win[static_cast<size_t>(j)] *
                     audio[static_cast<size_t>(start + j)], 0.0f);
             fft(X_tau);
-            std::vector<float> w_deriv(static_cast<size_t>(cfg.fft_size));
-            for (int j = 0; j < cfg.fft_size; ++j)
+            std::vector<float> w_deriv(static_cast<size_t>(fft_n));
+            for (int j = 0; j < fft_n; ++j)
                 w_deriv[static_cast<size_t>(j)] = static_cast<float>(PI) /
-                    static_cast<float>(cfg.fft_size - 1) *
+                    static_cast<float>(fft_n - 1) *
                     std::sin(2.0f * PI * static_cast<float>(j) /
-                             static_cast<float>(cfg.fft_size - 1));
-            std::vector<complex_f> X_dg(static_cast<size_t>(cfg.fft_size));
-            for (int j = 0; j < cfg.fft_size; ++j)
+                             static_cast<float>(fft_n - 1));
+            std::vector<complex_f> X_dg(static_cast<size_t>(fft_n));
+            for (int j = 0; j < fft_n; ++j)
                 X_dg[static_cast<size_t>(j)] = complex_f(
                     w_deriv[static_cast<size_t>(j)] * audio[static_cast<size_t>(start + j)], 0.0f);
             fft(X_dg);
@@ -197,7 +277,7 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
                     complex_f conj_X(re, -im);
                     float corr = (conj_X * X_dg[static_cast<size_t>(k)]).imag();
                     sf.reassigned_freqs[static_cast<size_t>(k)] =
-                        static_cast<float>(k) * static_cast<float>(sr) / static_cast<float>(cfg.fft_size) +
+                        static_cast<float>(k) * static_cast<float>(sr) / static_cast<float>(fft_n) +
                         corr / (2.0f * PI * mag_sq) * static_cast<float>(sr);
                     float dot_tau = (conj_X * X_tau[static_cast<size_t>(k)]).real();
                     sf.reassigned_times[static_cast<size_t>(k)] = dot_tau / mag_sq / static_cast<float>(sr);
@@ -214,12 +294,45 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
             report(progress, 0.1f + 0.5f * frame_idx / n_frames, "analyze");
     }
 
-    dataset.mutable_time_axis() = TimeAxis(dataset.frame_count(), cfg.hop_size, sr);
-    dataset.mutable_source_metadata().file_path = cfg.input_path;
-    auto& am = dataset.mutable_analysis_metadata();
-    am.fft_size = cfg.fft_size;
-    am.hop_size = cfg.hop_size;
-    am.sample_rate = sr;
+    // Dataset metadata comes from the canonical config — never from
+    // parallel locals. Analysis method/version record the S4 math.
+    dataset.mutable_time_axis() = TimeAxis(dataset.frame_count(), hop_n, sr);
+    {
+        auto& sm = dataset.mutable_source_metadata();
+        sm.file_path = pc.input.file_path;
+        sm.file_hash = pc.input.file_hash;
+        sm.file_size_bytes = pc.input.file_size_bytes;
+        sm.sample_rate = pc.input.sample_rate;
+        sm.num_channels = pc.input.num_channels;
+        sm.duration_seconds = pc.input.duration_seconds;
+        sm.codec_name = pc.input.codec_name;
+    }
+    {
+        auto& am = dataset.mutable_analysis_metadata();
+        ProjectConfigAdapter::to_analysis_metadata(pc, am);
+        am.analyzer_version = "2";  // S4 amplitude-corrected one-sided STFT
+        am.total_frames = dataset.frame_count();
+        am.total_duration_seconds = dataset.total_duration();
+    }
+    {
+        auto& ci = dataset.mutable_channel_info();
+        ci.total_channels = native_ch;
+        ci.analyzed_channels = 1;
+        ci.analyzed_channel_index = 0;
+        ci.channels_mixed = (native_ch > 1);
+        ci.channel_names.clear();
+        for (int ch = 0; ch < native_ch && ch < 64; ++ch)
+            ci.channel_names.push_back(channel_name_for(ch));
+    }
+    {
+        auto& nm = dataset.mutable_normalization_info();
+        nm.window_coherent_gain = pc.analysis.window_coherent_gain;
+        nm.window_energy_gain = pc.dynamic_range.window_energy_gain;
+        nm.magnitude_scale = pc.analysis.magnitude_scale;
+        nm.reference_amplitude = pc.dynamic_range.reference_amplitude;
+        nm.db_floor = pc.dynamic_range.db_floor;
+        nm.db_reference = pc.dynamic_range.reference_amplitude;
+    }
     samples_out = audio;
 
     return Error::success();
@@ -253,7 +366,21 @@ Error render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& datase
     const std::string render_cfg_err = validate_config(cfg);
     if (!render_cfg_err.empty())
         return Error::make(Subsystem::Pipeline, JobError::BadConfig, "config: " + render_cfg_err);
-    if (cfg.hop_size == 0) cfg.hop_size = cfg.fft_size / 2;
+    // Hop defaulting lives in make_project_config (single site).
+    // Render configuration flows from the canonical ProjectConfig through
+    // the adapter (single mapping). Pipeline execution defaults that the
+    // canonical model intentionally leaves open: min_hz 0 = 20 Hz here.
+    // Video-only fields (fps/codec/crf) stay on GenerateConfig: the video
+    // tier is explicitly not byte-reproducible.
+    DecodedMedia rmedia;
+    rmedia.file_path = dataset.source_metadata().file_path;
+    rmedia.file_hash = dataset.source_metadata().file_hash;
+    rmedia.file_size_bytes = dataset.source_metadata().file_size_bytes;
+    rmedia.sample_rate = dataset.sample_rate();
+    rmedia.num_channels = dataset.channel_info().total_channels;
+    rmedia.duration_seconds = dataset.source_metadata().duration_seconds;
+    rmedia.codec_name = dataset.source_metadata().codec_name;
+    const ProjectConfig rpc = make_project_config(cfg, rmedia);
     const float fmin = (cfg.min_freq > 0) ? cfg.min_freq : 20.0f;
     const std::string tmp = tmp_for(cfg.output_path);
     if (cfg.output_format == "video") {
@@ -263,7 +390,7 @@ Error render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& datase
         vrcfg.fps = cfg.fps;
         vrcfg.codec = cfg.video_codec;
         vrcfg.crf = cfg.crf;
-        vrcfg.freq_scale = parse_freq_scale(cfg.freq_scale);
+        vrcfg.freq_scale = parse_video_freq_scale(cfg.freq_scale);
         vrcfg.freq_min_hz = fmin;
         vrcfg.freq_max_hz = cfg.max_freq;
         vrcfg.db_floor = -cfg.db_range;
@@ -275,15 +402,8 @@ Error render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& datase
                                "encode: video render failed for '" + cfg.output_path + "'");
     } else if (cfg.visualization == "spectrogram") {
         SpectrogramConfig sc;
-        sc.width = cfg.width;
-        sc.height = cfg.height;
-        sc.freq_scale = parse_freq_scale(cfg.freq_scale);
+        ProjectConfigAdapter::to_spectrogram_config(rpc, sc);
         sc.freq_min_hz = fmin;
-        sc.freq_max_hz = cfg.max_freq;
-        sc.cqt_center_hz = cfg.cqt_center;
-        sc.cqt_q = cfg.cqt_q;
-        sc.db_ceiling = 0.0f;
-        sc.db_floor = -cfg.db_range;
         SpectrogramRenderer renderer(sc);
         if (cfg.use_gpu) {
             // ponytail: GPU fills RGBAImage; same PNG writer as CPU path
@@ -301,15 +421,8 @@ Error render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& datase
         }
     } else {
         SpectrumConfig sc;
-        sc.width = cfg.width;
-        sc.height = cfg.height;
-        sc.freq_scale = parse_freq_scale(cfg.freq_scale);
+        ProjectConfigAdapter::to_spectrum_config(rpc, sc);
         sc.freq_min_hz = fmin;
-        sc.freq_max_hz = cfg.max_freq;
-        sc.cqt_center_hz = cfg.cqt_center;
-        sc.cqt_q = cfg.cqt_q;
-        sc.db_ceiling = 0.0f;
-        sc.db_floor = -cfg.db_range;
         SpectrumRenderer renderer(sc);
         if (renderer.render_to_png(dataset, tmp) != SpectrumError::Ok)
             return Error::make(Subsystem::Render, JobError::RenderError,

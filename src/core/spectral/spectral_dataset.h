@@ -12,8 +12,12 @@ namespace Spectral {
 // ============================================================================
 // Schema version
 // ============================================================================
-constexpr uint32_t SPECTRAL_DATASET_VERSION = 2;
-constexpr uint32_t SPECTRAL_DATASET_MIN_COMPATIBLE_VERSION = 1;
+// v3 (S5): explicit little-endian wire format (no native POD memcpy),
+// reassigned arrays serialized, strict version gate. v1/v2 blobs are
+// rejected — the layout contract changed. History: v1 initial, v2 added
+// method/band_count, v3 explicit LE + reassigned + strict gate.
+constexpr uint32_t SPECTRAL_DATASET_VERSION = 3;
+constexpr uint32_t SPECTRAL_DATASET_MIN_COMPATIBLE_VERSION = 3;
 
 // ============================================================================
 // Source metadata
@@ -383,6 +387,12 @@ public:
     static uint32_t current_version() { return SPECTRAL_DATASET_VERSION; }
     static uint32_t min_compatible_version() { return SPECTRAL_DATASET_MIN_COMPATIBLE_VERSION; }
     uint32_t version() const { return version_; }
+
+    // Dataset identity: SHA-256 hex of the canonical binary serialization.
+    // Same semantic content -> same bytes -> same identity (no timestamps,
+    // addresses, or locale-dependent data in the binary artifact).
+    // FNV-1a in the header is corruption detection only, NOT identity.
+    std::string dataset_identity() const;
     
     // Comparison
     bool operator==(const SpectralDataset& other) const;

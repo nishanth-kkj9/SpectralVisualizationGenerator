@@ -1,5 +1,7 @@
 #include "spectral_dataset.h"
 
+#include "project/project_config.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -19,8 +21,14 @@ namespace {
 constexpr uint32_t BINARY_MAGIC = 0x53504454;  // "SPDT" (Spectral Dataset)
 constexpr uint32_t BINARY_HEADER_SIZE = 64;   // Fixed header size
 constexpr size_t MAX_DATASET_SIZE = 1024ull * 1024ull * 1024ull * 4ull; // 4 GB hard cap
+// Per-field hard bounds (documented; see docs/reproducibility.md).
+constexpr uint64_t MAX_STR_BYTES = 4ull << 20;  // 4 MB per string
+constexpr uint64_t MAX_FRAMES = 1ull << 24;     // 16M frames
+constexpr uint64_t MAX_BINS = 1ull << 20;       // 1M bins
+constexpr uint64_t MAX_NAMES = 256;             // channel names
 
-// FNV-1a 64-bit for deterministic checksums (no <random> nondeterminism)
+// FNV-1a 64-bit header checksum: corruption detection ONLY, not identity
+// (identity is SHA-256 over canonical bytes; see dataset_identity).
 constexpr uint64_t FNV_OFFSET = 0xcbf29ce484222325ULL;
 constexpr uint64_t FNV_PRIME  = 0x100000001b3ULL;
 
@@ -33,34 +41,111 @@ uint64_t fnv1a_64(const uint8_t* data, size_t len) {
     return h;
 }
 
-template <typename T>
-void append(std::vector<uint8_t>& out, const T& v) {
-    const uint8_t* p = reinterpret_cast<const uint8_t*>(&v);
-    out.insert(out.end(), p, p + sizeof(T));
+// v3 explicit little-endian wire codec. No native struct memcpy: byte
+// order and padding are platform properties, never the format contract.
+inline void w_u8(std::vector<uint8_t>& o, uint8_t v) { o.push_back(v); }
+inline void w_u32(std::vector<uint8_t>& o, uint32_t v) {
+    o.push_back(static_cast<uint8_t>(v));
+    o.push_back(static_cast<uint8_t>(v >> 8));
+    o.push_back(static_cast<uint8_t>(v >> 16));
+    o.push_back(static_cast<uint8_t>(v >> 24));
+}
+inline void w_i32(std::vector<uint8_t>& o, int32_t v) {
+    w_u32(o, static_cast<uint32_t>(v));
+}
+inline void w_u64(std::vector<uint8_t>& o, uint64_t v) {
+    for (int i = 0; i < 8; ++i)
+        o.push_back(static_cast<uint8_t>(v >> (8 * i)));
+}
+inline void w_f32(std::vector<uint8_t>& o, float v) {
+    uint32_t u = 0;
+    static_assert(sizeof(float) == 4, "IEEE-754 float32 required");
+    std::memcpy(&u, &v, 4);
+    w_u32(o, u);
+}
+inline void w_f64(std::vector<uint8_t>& o, double v) {
+    uint64_t u = 0;
+    static_assert(sizeof(double) == 8, "IEEE-754 float64 required");
+    std::memcpy(&u, &v, 8);
+    w_u64(o, u);
+}
+inline void w_bool(std::vector<uint8_t>& o, bool v) { o.push_back(v ? 1 : 0); }
+inline void w_str(std::vector<uint8_t>& o, const std::string& s) {
+    w_u32(o, static_cast<uint32_t>(s.size()));
+    o.insert(o.end(), s.begin(), s.end());
 }
 
-void append_str(std::vector<uint8_t>& out, const std::string& s) {
-    uint32_t n = static_cast<uint32_t>(s.size());
-    append(out, n);
-    out.insert(out.end(), s.begin(), s.end());
+inline bool need_bytes(size_t size, size_t off, size_t n) {
+    return n <= size && off <= size - n;
 }
-
-bool read_str(const uint8_t* data, size_t size, size_t& off, std::string& s) {
-    if (off + sizeof(uint32_t) > size) return false;
-    uint32_t n;
-    std::memcpy(&n, data + off, sizeof(uint32_t));
-    off += sizeof(uint32_t);
-    if (n > size - off) return false;
+inline bool r_u8(const uint8_t* data, size_t size, size_t& off, uint8_t& v) {
+    if (!need_bytes(size, off, 1)) return false;
+    v = data[off++];
+    return true;
+}
+inline bool r_u32(const uint8_t* data, size_t size, size_t& off, uint32_t& v) {
+    if (!need_bytes(size, off, 4)) return false;
+    v = static_cast<uint32_t>(data[off]) |
+        (static_cast<uint32_t>(data[off + 1]) << 8) |
+        (static_cast<uint32_t>(data[off + 2]) << 16) |
+        (static_cast<uint32_t>(data[off + 3]) << 24);
+    off += 4;
+    return true;
+}
+inline bool r_i32(const uint8_t* data, size_t size, size_t& off, int32_t& v) {
+    uint32_t u = 0;
+    if (!r_u32(data, size, off, u)) return false;
+    v = static_cast<int32_t>(u);
+    return true;
+}
+inline bool r_u64(const uint8_t* data, size_t size, size_t& off, uint64_t& v) {
+    if (!need_bytes(size, off, 8)) return false;
+    v = 0;
+    for (int i = 0; i < 8; ++i)
+        v |= static_cast<uint64_t>(data[off + i]) << (8 * i);
+    off += 8;
+    return true;
+}
+inline bool r_f32(const uint8_t* data, size_t size, size_t& off, float& v) {
+    uint32_t u = 0;
+    if (!r_u32(data, size, off, u)) return false;
+    static_assert(sizeof(float) == 4, "IEEE-754 float32 required");
+    std::memcpy(&v, &u, 4);
+    return true;
+}
+inline bool r_f64(const uint8_t* data, size_t size, size_t& off, double& v) {
+    uint64_t u = 0;
+    if (!r_u64(data, size, off, u)) return false;
+    static_assert(sizeof(double) == 8, "IEEE-754 float64 required");
+    std::memcpy(&v, &u, 8);
+    return true;
+}
+inline bool r_bool(const uint8_t* data, size_t size, size_t& off, bool& v) {
+    uint8_t b = 0;
+    if (!r_u8(data, size, off, b)) return false;
+    if (b > 1) return false;
+    v = (b == 1);
+    return true;
+}
+inline bool r_str(const uint8_t* data, size_t size, size_t& off, std::string& s) {
+    uint32_t n = 0;
+    if (!r_u32(data, size, off, n)) return false;
+    if (n > MAX_STR_BYTES || n > size - off) return false;
     s.assign(reinterpret_cast<const char*>(data + off), n);
     off += n;
     return true;
 }
-
-template <typename T>
-bool read_pod(const uint8_t* data, size_t size, size_t& off, T& v) {
-    if (off + sizeof(T) > size) return false;
-    std::memcpy(&v, data + off, sizeof(T));
-    off += sizeof(T);
+// Bounded array read: count cap + exact byte precheck before any
+// allocation, so hostile lengths fail before memory moves.
+inline bool read_f32_array(const uint8_t* data, size_t size, size_t& off,
+                           uint64_t count, uint64_t cap, std::vector<float>& out) {
+    if (count > cap) return false;
+    if (count > (MAX_DATASET_SIZE - off) / 4) return false;
+    if (off + count * 4 > size) return false;
+    out.resize(static_cast<size_t>(count));
+    for (uint64_t k = 0; k < count; ++k) {
+        if (!r_f32(data, size, off, out[static_cast<size_t>(k)])) return false;
+    }
     return true;
 }
 
@@ -190,12 +275,66 @@ void SpectralDataset::validate_dimensions(ValidationResult& r) const {
             r.add_error("frame[" + std::to_string(i) +
                         "].phases size != num_bins");
         }
+        if (static_cast<int>(f.power.size()) != nb) {
+            r.add_error("frame[" + std::to_string(i) +
+                        "].power size != num_bins");
+        }
+        // Reassigned coordinates are either absent (conventional STFT)
+        // or cover every bin.
+        if (!f.reassigned_times.empty() &&
+            static_cast<int>(f.reassigned_times.size()) != nb) {
+            r.add_error("frame[" + std::to_string(i) +
+                        "].reassigned_times size != num_bins");
+        }
+        if (!f.reassigned_freqs.empty() &&
+            static_cast<int>(f.reassigned_freqs.size()) != nb) {
+            r.add_error("frame[" + std::to_string(i) +
+                        "].reassigned_freqs size != num_bins");
+        }
         if (f.n_fft != analysis_meta_.fft_size) {
             r.add_error("frame[" + std::to_string(i) +
                         "].n_fft (" + std::to_string(f.n_fft) +
                         ") != analysis.fft_size (" +
                         std::to_string(analysis_meta_.fft_size) + ")");
         }
+        // Timestamp convention: frame start == index * hop / rate.
+        if (analysis_meta_.sample_rate > 0 && analysis_meta_.hop_size > 0) {
+            const double expect = static_cast<double>(f.frame_index) *
+                                  analysis_meta_.hop_size / analysis_meta_.sample_rate;
+            const double tol = 1e-9 * (std::fabs(expect) > 1.0 ? std::fabs(expect) : 1.0);
+            if (std::fabs(f.timestamp - expect) > tol) {
+                r.add_error("frame[" + std::to_string(i) + "].timestamp != index*hop/rate");
+            }
+        }
+        if (!std::isfinite(f.timestamp)) {
+            r.add_error("frame[" + std::to_string(i) + "].timestamp not finite");
+        }
+    }
+    // Bin frequencies must follow k * sr / N, nonnegative and ordered.
+    if (analysis_meta_.fft_size > 0 && analysis_meta_.sample_rate > 0) {
+        for (int k = 0; k < nb && k < static_cast<int>(freq_axis_.bin_frequencies.size()); ++k) {
+            const float expect = static_cast<float>(k) * analysis_meta_.sample_rate /
+                                 static_cast<float>(analysis_meta_.fft_size);
+            if (std::fabs(freq_axis_.bin_frequencies[k] - expect) > 1e-3f * (expect + 1.0f)) {
+                r.add_error("frequency_axis.bin_frequencies[" + std::to_string(k) +
+                            "] != k*sr/N");
+                break;
+            }
+            if (freq_axis_.bin_frequencies[k] < 0.0f) {
+                r.add_error("frequency_axis.bin_frequencies has negative entry");
+                break;
+            }
+            if (k > 0 && freq_axis_.bin_frequencies[k] < freq_axis_.bin_frequencies[k - 1]) {
+                r.add_error("frequency_axis.bin_frequencies not ordered");
+                break;
+            }
+        }
+    }
+    if (!std::isfinite(freq_axis_.nyquist) || !std::isfinite(freq_axis_.resolution)) {
+        r.add_error("frequency_axis nyquist/resolution not finite");
+    }
+    if (!std::isfinite(time_axis_.frame_duration) || !std::isfinite(time_axis_.total_duration)) {
+        r.add_error("time_axis durations not finite");
     }
 }
 
@@ -511,25 +650,25 @@ bool SpectralDataset::export_csv(const std::string& path) const {
 // ============================================================================
 
 void SpectralDataset::write_header(std::vector<uint8_t>& out) const {
-    append(out, BINARY_MAGIC);
-    append(out, version_);
-    append(out, BINARY_HEADER_SIZE);
+    w_u32(out, BINARY_MAGIC);
+    w_u32(out, version_);
+    w_u32(out, BINARY_HEADER_SIZE);
     // Placeholders for sizes/checksum (filled after write)
-    const size_t payload_size_pos = out.size();
-    append(out, static_cast<uint64_t>(0)); // payload size
-    append(out, static_cast<uint64_t>(0)); // checksum
+    w_u64(out, 0); // payload size
+    w_u64(out, 0); // checksum
     // Reserve rest of header
     out.resize(BINARY_HEADER_SIZE, 0);
-    (void)payload_size_pos;
 }
 
 bool SpectralDataset::read_header(const uint8_t* data, size_t size, size_t& off) {
-    uint32_t magic, version, hdr_size;
-    if (!read_pod(data, size, off, magic)) return false;
-    if (!read_pod(data, size, off, version)) return false;
-    if (!read_pod(data, size, off, hdr_size)) return false;
+    uint32_t magic = 0, version = 0, hdr_size = 0;
+    if (!r_u32(data, size, off, magic)) return false;
+    if (!r_u32(data, size, off, version)) return false;
+    if (!r_u32(data, size, off, hdr_size)) return false;
     if (magic != BINARY_MAGIC) return false;
     if (hdr_size != BINARY_HEADER_SIZE) return false;
+    // v3 gate: only the current explicit-LE layout loads. Older blobs
+    // (native-POD v1/v2) are rejected rather than misinterpreted.
     if (version < SPECTRAL_DATASET_MIN_COMPATIBLE_VERSION) return false;
     if (version > SPECTRAL_DATASET_VERSION) return false;
     version_ = version;
@@ -539,106 +678,104 @@ bool SpectralDataset::read_header(const uint8_t* data, size_t size, size_t& off)
 
 void SpectralDataset::write_metadata(std::vector<uint8_t>& out) const {
     // Source metadata
-    append_str(out, source_meta_.file_path);
-    append_str(out, source_meta_.file_hash);
-    append(out, source_meta_.file_size_bytes);
-    append(out, source_meta_.sample_rate);
-    append(out, source_meta_.num_channels);
-    append(out, source_meta_.duration_seconds);
-    append_str(out, source_meta_.codec_name);
-    append_str(out, source_meta_.codec_long_name);
+    w_str(out, source_meta_.file_path);
+    w_str(out, source_meta_.file_hash);
+    w_u64(out, source_meta_.file_size_bytes);
+    w_i32(out, source_meta_.sample_rate);
+    w_i32(out, source_meta_.num_channels);
+    w_f64(out, source_meta_.duration_seconds);
+    w_str(out, source_meta_.codec_name);
+    w_str(out, source_meta_.codec_long_name);
     // Analysis metadata
-    append_str(out, analysis_meta_.window_type);
-    append(out, analysis_meta_.window_coherent_gain);
-    append(out, analysis_meta_.fft_size);
-    append(out, analysis_meta_.hop_size);
-    append(out, analysis_meta_.overlap_ratio);
-    append(out, analysis_meta_.sample_rate);
-    append(out, analysis_meta_.analyzed_channels);
-    append(out, analysis_meta_.channel_mapping);
-    append(out, analysis_meta_.magnitude_scale);
-    append(out, analysis_meta_.phase_unwrap);
-    append(out, analysis_meta_.nyquist_frequency);
-    append(out, analysis_meta_.num_frequency_bins);
-    append(out, analysis_meta_.frame_duration_seconds);
-    append(out, analysis_meta_.total_duration_seconds);
-    append(out, analysis_meta_.total_frames);
-    append_str(out, analysis_meta_.analyzer_version);
-    if (version_ >= 2) {
-        append_str(out, analysis_meta_.analysis_method);
-        append(out, analysis_meta_.band_count);
-    }
+    w_str(out, analysis_meta_.window_type);
+    w_f32(out, analysis_meta_.window_coherent_gain);
+    w_i32(out, analysis_meta_.fft_size);
+    w_i32(out, analysis_meta_.hop_size);
+    w_f32(out, analysis_meta_.overlap_ratio);
+    w_i32(out, analysis_meta_.sample_rate);
+    w_i32(out, analysis_meta_.analyzed_channels);
+    w_i32(out, analysis_meta_.channel_mapping);
+    w_f32(out, analysis_meta_.magnitude_scale);
+    w_f32(out, analysis_meta_.phase_unwrap);
+    w_f32(out, analysis_meta_.nyquist_frequency);
+    w_i32(out, analysis_meta_.num_frequency_bins);
+    w_f64(out, analysis_meta_.frame_duration_seconds);
+    w_f64(out, analysis_meta_.total_duration_seconds);
+    w_i32(out, analysis_meta_.total_frames);
+    w_str(out, analysis_meta_.analyzer_version);
+    w_str(out, analysis_meta_.analysis_method);
+    w_i32(out, analysis_meta_.band_count);
     // Normalization
-    append(out, normalization_.window_coherent_gain);
-    append(out, normalization_.window_energy_gain);
-    append(out, normalization_.magnitude_scale);
-    append(out, normalization_.reference_amplitude);
-    append(out, normalization_.db_floor);
-    append(out, normalization_.db_reference);
-    append(out, normalization_.phase_unwrapped);
-    append(out, normalization_.phase_reference);
-    append(out, normalization_.channel_normalized);
+    w_f32(out, normalization_.window_coherent_gain);
+    w_f32(out, normalization_.window_energy_gain);
+    w_f32(out, normalization_.magnitude_scale);
+    w_f32(out, normalization_.reference_amplitude);
+    w_f32(out, normalization_.db_floor);
+    w_f32(out, normalization_.db_reference);
+    w_bool(out, normalization_.phase_unwrapped);
+    w_f32(out, normalization_.phase_reference);
+    w_bool(out, normalization_.channel_normalized);
     // Channel info
-    append(out, channel_info_.total_channels);
-    append(out, channel_info_.analyzed_channels);
-    append(out, channel_info_.analyzed_channel_index);
-    append(out, channel_info_.channels_mixed);
-    append(out, static_cast<uint32_t>(channel_info_.channel_names.size()));
-    for (const auto& n : channel_info_.channel_names) append_str(out, n);
+    w_i32(out, channel_info_.total_channels);
+    w_i32(out, channel_info_.analyzed_channels);
+    w_i32(out, channel_info_.analyzed_channel_index);
+    w_bool(out, channel_info_.channels_mixed);
+    w_u32(out, static_cast<uint32_t>(channel_info_.channel_names.size()));
+    for (const auto& n : channel_info_.channel_names) w_str(out, n);
 }
 
 bool SpectralDataset::read_metadata(const uint8_t* data, size_t size, size_t& off) {
-    if (!read_str(data, size, off, source_meta_.file_path)) return false;
-    if (!read_str(data, size, off, source_meta_.file_hash)) return false;
-    if (!read_pod(data, size, off, source_meta_.file_size_bytes)) return false;
-    if (!read_pod(data, size, off, source_meta_.sample_rate)) return false;
-    if (!read_pod(data, size, off, source_meta_.num_channels)) return false;
-    if (!read_pod(data, size, off, source_meta_.duration_seconds)) return false;
-    if (!read_str(data, size, off, source_meta_.codec_name)) return false;
-    if (!read_str(data, size, off, source_meta_.codec_long_name)) return false;
+    if (!r_str(data, size, off, source_meta_.file_path)) return false;
+    if (!r_str(data, size, off, source_meta_.file_hash)) return false;
+    uint64_t fsize = 0;
+    if (!r_u64(data, size, off, fsize)) return false;
+    source_meta_.file_size_bytes = fsize;
+    if (!r_i32(data, size, off, source_meta_.sample_rate)) return false;
+    if (!r_i32(data, size, off, source_meta_.num_channels)) return false;
+    if (!r_f64(data, size, off, source_meta_.duration_seconds)) return false;
+    if (!r_str(data, size, off, source_meta_.codec_name)) return false;
+    if (!r_str(data, size, off, source_meta_.codec_long_name)) return false;
 
-    if (!read_str(data, size, off, analysis_meta_.window_type)) return false;
-    if (!read_pod(data, size, off, analysis_meta_.window_coherent_gain)) return false;
-    if (!read_pod(data, size, off, analysis_meta_.fft_size)) return false;
-    if (!read_pod(data, size, off, analysis_meta_.hop_size)) return false;
-    if (!read_pod(data, size, off, analysis_meta_.overlap_ratio)) return false;
-    if (!read_pod(data, size, off, analysis_meta_.sample_rate)) return false;
-    if (!read_pod(data, size, off, analysis_meta_.analyzed_channels)) return false;
-    if (!read_pod(data, size, off, analysis_meta_.channel_mapping)) return false;
-    if (!read_pod(data, size, off, analysis_meta_.magnitude_scale)) return false;
-    if (!read_pod(data, size, off, analysis_meta_.phase_unwrap)) return false;
-    if (!read_pod(data, size, off, analysis_meta_.nyquist_frequency)) return false;
-    if (!read_pod(data, size, off, analysis_meta_.num_frequency_bins)) return false;
-    if (!read_pod(data, size, off, analysis_meta_.frame_duration_seconds)) return false;
-    if (!read_pod(data, size, off, analysis_meta_.total_duration_seconds)) return false;
-    if (!read_pod(data, size, off, analysis_meta_.total_frames)) return false;
-    if (!read_str(data, size, off, analysis_meta_.analyzer_version)) return false;
-    if (version_ >= 2) {
-        if (!read_str(data, size, off, analysis_meta_.analysis_method)) return false;
-        if (!read_pod(data, size, off, analysis_meta_.band_count)) return false;
-    }
+    if (!r_str(data, size, off, analysis_meta_.window_type)) return false;
+    if (!r_f32(data, size, off, analysis_meta_.window_coherent_gain)) return false;
+    if (!r_i32(data, size, off, analysis_meta_.fft_size)) return false;
+    if (!r_i32(data, size, off, analysis_meta_.hop_size)) return false;
+    if (!r_f32(data, size, off, analysis_meta_.overlap_ratio)) return false;
+    if (!r_i32(data, size, off, analysis_meta_.sample_rate)) return false;
+    if (!r_i32(data, size, off, analysis_meta_.analyzed_channels)) return false;
+    if (!r_i32(data, size, off, analysis_meta_.channel_mapping)) return false;
+    if (!r_f32(data, size, off, analysis_meta_.magnitude_scale)) return false;
+    if (!r_f32(data, size, off, analysis_meta_.phase_unwrap)) return false;
+    if (!r_f32(data, size, off, analysis_meta_.nyquist_frequency)) return false;
+    if (!r_i32(data, size, off, analysis_meta_.num_frequency_bins)) return false;
+    if (!r_f64(data, size, off, analysis_meta_.frame_duration_seconds)) return false;
+    if (!r_f64(data, size, off, analysis_meta_.total_duration_seconds)) return false;
+    if (!r_i32(data, size, off, analysis_meta_.total_frames)) return false;
+    if (!r_str(data, size, off, analysis_meta_.analyzer_version)) return false;
+    if (!r_str(data, size, off, analysis_meta_.analysis_method)) return false;
+    if (!r_i32(data, size, off, analysis_meta_.band_count)) return false;
 
-    if (!read_pod(data, size, off, normalization_.window_coherent_gain)) return false;
-    if (!read_pod(data, size, off, normalization_.window_energy_gain)) return false;
-    if (!read_pod(data, size, off, normalization_.magnitude_scale)) return false;
-    if (!read_pod(data, size, off, normalization_.reference_amplitude)) return false;
-    if (!read_pod(data, size, off, normalization_.db_floor)) return false;
-    if (!read_pod(data, size, off, normalization_.db_reference)) return false;
-    if (!read_pod(data, size, off, normalization_.phase_unwrapped)) return false;
-    if (!read_pod(data, size, off, normalization_.phase_reference)) return false;
-    if (!read_pod(data, size, off, normalization_.channel_normalized)) return false;
+    if (!r_f32(data, size, off, normalization_.window_coherent_gain)) return false;
+    if (!r_f32(data, size, off, normalization_.window_energy_gain)) return false;
+    if (!r_f32(data, size, off, normalization_.magnitude_scale)) return false;
+    if (!r_f32(data, size, off, normalization_.reference_amplitude)) return false;
+    if (!r_f32(data, size, off, normalization_.db_floor)) return false;
+    if (!r_f32(data, size, off, normalization_.db_reference)) return false;
+    if (!r_bool(data, size, off, normalization_.phase_unwrapped)) return false;
+    if (!r_f32(data, size, off, normalization_.phase_reference)) return false;
+    if (!r_bool(data, size, off, normalization_.channel_normalized)) return false;
 
-    if (!read_pod(data, size, off, channel_info_.total_channels)) return false;
-    if (!read_pod(data, size, off, channel_info_.analyzed_channels)) return false;
-    if (!read_pod(data, size, off, channel_info_.analyzed_channel_index)) return false;
-    if (!read_pod(data, size, off, channel_info_.channels_mixed)) return false;
+    if (!r_i32(data, size, off, channel_info_.total_channels)) return false;
+    if (!r_i32(data, size, off, channel_info_.analyzed_channels)) return false;
+    if (!r_i32(data, size, off, channel_info_.analyzed_channel_index)) return false;
+    if (!r_bool(data, size, off, channel_info_.channels_mixed)) return false;
     uint32_t n_names = 0;
-    if (!read_pod(data, size, off, n_names)) return false;
-    if (n_names > 1024) return false;
+    if (!r_u32(data, size, off, n_names)) return false;
+    if (n_names > MAX_NAMES) return false;
     channel_info_.channel_names.clear();
     for (uint32_t i = 0; i < n_names; ++i) {
         std::string n;
-        if (!read_str(data, size, off, n)) return false;
+        if (!r_str(data, size, off, n)) return false;
         channel_info_.channel_names.push_back(n);
     }
     return true;
@@ -646,111 +783,117 @@ bool SpectralDataset::read_metadata(const uint8_t* data, size_t size, size_t& of
 
 void SpectralDataset::write_axes(std::vector<uint8_t>& out) const {
     // Frequency axis
-    append(out, freq_axis_.num_bins);
-    append(out, freq_axis_.fft_size);
-    append(out, freq_axis_.sample_rate);
-    append(out, freq_axis_.nyquist);
-    append(out, freq_axis_.resolution);
-    append(out, static_cast<uint64_t>(freq_axis_.bin_frequencies.size()));
-    for (float f : freq_axis_.bin_frequencies) append(out, f);
+    w_i32(out, freq_axis_.num_bins);
+    w_i32(out, freq_axis_.fft_size);
+    w_i32(out, freq_axis_.sample_rate);
+    w_f32(out, freq_axis_.nyquist);
+    w_f32(out, freq_axis_.resolution);
+    w_u64(out, static_cast<uint64_t>(freq_axis_.bin_frequencies.size()));
+    for (float f : freq_axis_.bin_frequencies) w_f32(out, f);
     // Time axis
-    append(out, time_axis_.num_frames);
-    append(out, time_axis_.hop_size);
-    append(out, time_axis_.sample_rate);
-    append(out, time_axis_.frame_duration);
-    append(out, time_axis_.total_duration);
-    append(out, static_cast<uint64_t>(time_axis_.frame_times.size()));
-    for (double t : time_axis_.frame_times) append(out, t);
+    w_i32(out, time_axis_.num_frames);
+    w_i32(out, time_axis_.hop_size);
+    w_i32(out, time_axis_.sample_rate);
+    w_f64(out, time_axis_.frame_duration);
+    w_f64(out, time_axis_.total_duration);
+    w_u64(out, static_cast<uint64_t>(time_axis_.frame_times.size()));
+    for (double t : time_axis_.frame_times) w_f64(out, t);
 }
 
 bool SpectralDataset::read_axes(const uint8_t* data, size_t size, size_t& off) {
-    if (!read_pod(data, size, off, freq_axis_.num_bins)) return false;
-    if (!read_pod(data, size, off, freq_axis_.fft_size)) return false;
-    if (!read_pod(data, size, off, freq_axis_.sample_rate)) return false;
-    if (!read_pod(data, size, off, freq_axis_.nyquist)) return false;
-    if (!read_pod(data, size, off, freq_axis_.resolution)) return false;
+    if (!r_i32(data, size, off, freq_axis_.num_bins)) return false;
+    if (!r_i32(data, size, off, freq_axis_.fft_size)) return false;
+    if (!r_i32(data, size, off, freq_axis_.sample_rate)) return false;
+    if (!r_f32(data, size, off, freq_axis_.nyquist)) return false;
+    if (!r_f32(data, size, off, freq_axis_.resolution)) return false;
     uint64_t nfreq = 0;
-    if (!read_pod(data, size, off, nfreq)) return false;
-    if (nfreq > static_cast<uint64_t>(freq_axis_.num_bins) + 1) return false;
+    if (!r_u64(data, size, off, nfreq)) return false;
+    if (nfreq > MAX_BINS + 1) return false;
     freq_axis_.bin_frequencies.resize(static_cast<size_t>(nfreq));
     for (uint64_t i = 0; i < nfreq; ++i) {
-        if (!read_pod(data, size, off, freq_axis_.bin_frequencies[i])) return false;
+        if (!r_f32(data, size, off, freq_axis_.bin_frequencies[static_cast<size_t>(i)])) return false;
     }
 
-    if (!read_pod(data, size, off, time_axis_.num_frames)) return false;
-    if (!read_pod(data, size, off, time_axis_.hop_size)) return false;
-    if (!read_pod(data, size, off, time_axis_.sample_rate)) return false;
-    if (!read_pod(data, size, off, time_axis_.frame_duration)) return false;
-    if (!read_pod(data, size, off, time_axis_.total_duration)) return false;
+    if (!r_i32(data, size, off, time_axis_.num_frames)) return false;
+    if (!r_i32(data, size, off, time_axis_.hop_size)) return false;
+    if (!r_i32(data, size, off, time_axis_.sample_rate)) return false;
+    if (!r_f64(data, size, off, time_axis_.frame_duration)) return false;
+    if (!r_f64(data, size, off, time_axis_.total_duration)) return false;
     uint64_t ntimes = 0;
-    if (!read_pod(data, size, off, ntimes)) return false;
-    if (ntimes > 100000000ULL) return false; // sanity
+    if (!r_u64(data, size, off, ntimes)) return false;
+    if (ntimes > MAX_FRAMES) return false;
     time_axis_.frame_times.resize(static_cast<size_t>(ntimes));
     for (uint64_t i = 0; i < ntimes; ++i) {
-        if (!read_pod(data, size, off, time_axis_.frame_times[i])) return false;
+        if (!r_f64(data, size, off, time_axis_.frame_times[static_cast<size_t>(i)])) return false;
     }
     return true;
 }
 
 void SpectralDataset::write_frames(std::vector<uint8_t>& out) const {
-    append(out, static_cast<uint64_t>(frames_.size()));
+    w_u64(out, static_cast<uint64_t>(frames_.size()));
     for (const auto& f : frames_) {
-        append(out, f.frame_index);
-        append(out, f.n_fft);
-        append(out, f.window_factor);
-        append(out, f.timestamp);
-        append(out, f.rms);
-        append(out, f.peak_magnitude);
-        append(out, f.spectral_centroid);
-        append(out, f.spectral_bandwidth);
-        if (version_ >= 2) {
-            append(out, f.band_count);
-        }
-        append(out, static_cast<uint64_t>(f.magnitudes.size()));
-        for (float m : f.magnitudes) append(out, m);
-        append(out, static_cast<uint64_t>(f.phases.size()));
-        for (float p : f.phases) append(out, p);
-        append(out, static_cast<uint64_t>(f.power.size()));
-        for (float p : f.power) append(out, p);
+        w_i32(out, f.frame_index);
+        w_i32(out, f.n_fft);
+        w_f32(out, f.window_factor);
+        w_f64(out, f.timestamp);
+        w_f32(out, f.rms);
+        w_f32(out, f.peak_magnitude);
+        w_f32(out, f.spectral_centroid);
+        w_f32(out, f.spectral_bandwidth);
+        w_i32(out, f.band_count);
+        w_u64(out, static_cast<uint64_t>(f.magnitudes.size()));
+        for (float m : f.magnitudes) w_f32(out, m);
+        w_u64(out, static_cast<uint64_t>(f.phases.size()));
+        for (float p : f.phases) w_f32(out, p);
+        w_u64(out, static_cast<uint64_t>(f.power.size()));
+        for (float p : f.power) w_f32(out, p);
+        // Reassigned coordinates (v3; empty for conventional STFT).
+        w_u64(out, static_cast<uint64_t>(f.reassigned_times.size()));
+        for (float t : f.reassigned_times) w_f32(out, t);
+        w_u64(out, static_cast<uint64_t>(f.reassigned_freqs.size()));
+        for (float fr : f.reassigned_freqs) w_f32(out, fr);
     }
 }
 
 bool SpectralDataset::read_frames(const uint8_t* data, size_t size, size_t& off) {
     uint64_t n = 0;
-    if (!read_pod(data, size, off, n)) return false;
-    if (n > 100000000ULL) return false;
+    if (!r_u64(data, size, off, n)) return false;
+    if (n > MAX_FRAMES) return false;
+    const uint64_t nb = freq_axis_.num_bins > 0
+                            ? static_cast<uint64_t>(freq_axis_.num_bins)
+                            : MAX_BINS;
     frames_.clear();
     frames_.reserve(static_cast<size_t>(n));
     for (uint64_t i = 0; i < n; ++i) {
         SpectralFrame f;
-        if (!read_pod(data, size, off, f.frame_index)) return false;
-        if (!read_pod(data, size, off, f.n_fft)) return false;
-        if (!read_pod(data, size, off, f.window_factor)) return false;
-        if (!read_pod(data, size, off, f.timestamp)) return false;
-        if (!read_pod(data, size, off, f.rms)) return false;
-        if (!read_pod(data, size, off, f.peak_magnitude)) return false;
-        if (!read_pod(data, size, off, f.spectral_centroid)) return false;
-        if (!read_pod(data, size, off, f.spectral_bandwidth)) return false;
-        if (version_ >= 2) {
-            if (!read_pod(data, size, off, f.band_count)) return false;
-        }
-        uint64_t nm = 0, np = 0, npo = 0;
-        if (!read_pod(data, size, off, nm)) return false;
-        if (nm > static_cast<uint64_t>(freq_axis_.num_bins) + 1) return false;
-        f.magnitudes.resize(static_cast<size_t>(nm));
-        for (uint64_t k = 0; k < nm; ++k) {
-            if (!read_pod(data, size, off, f.magnitudes[k])) return false;
-        }
-        if (!read_pod(data, size, off, np)) return false;
-        f.phases.resize(static_cast<size_t>(np));
-        for (uint64_t k = 0; k < np; ++k) {
-            if (!read_pod(data, size, off, f.phases[k])) return false;
-        }
-        if (!read_pod(data, size, off, npo)) return false;
-        f.power.resize(static_cast<size_t>(npo));
-        for (uint64_t k = 0; k < npo; ++k) {
-            if (!read_pod(data, size, off, f.power[k])) return false;
-        }
+        if (!r_i32(data, size, off, f.frame_index)) return false;
+        if (!r_i32(data, size, off, f.n_fft)) return false;
+        if (!r_f32(data, size, off, f.window_factor)) return false;
+        if (!r_f64(data, size, off, f.timestamp)) return false;
+        if (!r_f32(data, size, off, f.rms)) return false;
+        if (!r_f32(data, size, off, f.peak_magnitude)) return false;
+        if (!r_f32(data, size, off, f.spectral_centroid)) return false;
+        if (!r_f32(data, size, off, f.spectral_bandwidth)) return false;
+        if (!r_i32(data, size, off, f.band_count)) return false;
+        uint64_t nm = 0, np = 0, npo = 0, nrt = 0, nrf = 0;
+        if (!r_u64(data, size, off, nm)) return false;
+        // v3 strict: spectral arrays match the declared bin count.
+        if (nm != nb) return false;
+        if (!read_f32_array(data, size, off, nm, MAX_BINS, f.magnitudes)) return false;
+        if (!r_u64(data, size, off, np)) return false;
+        if (np != nb) return false;
+        if (!read_f32_array(data, size, off, np, MAX_BINS, f.phases)) return false;
+        if (!r_u64(data, size, off, npo)) return false;
+        if (npo != nb) return false;
+        if (!read_f32_array(data, size, off, npo, MAX_BINS, f.power)) return false;
+        if (!r_u64(data, size, off, nrt)) return false;
+        if (nrt != 0 && nrt != nb) return false;
+        if (!read_f32_array(data, size, off, nrt, MAX_BINS, f.reassigned_times))
+            return false;
+        if (!r_u64(data, size, off, nrf)) return false;
+        if (nrf != 0 && nrf != nb) return false;
+        if (!read_f32_array(data, size, off, nrf, MAX_BINS, f.reassigned_freqs))
+            return false;
         frames_.push_back(std::move(f));
     }
     return true;
@@ -758,12 +901,10 @@ bool SpectralDataset::read_frames(const uint8_t* data, size_t size, size_t& off)
 
 bool SpectralDataset::serialize_binary(std::vector<uint8_t>& out) const {
     out.clear();
-    // ponytail: rough reserve — header + metadata + axes + frames.
-    // Avoids repeated realloc during append.
-    const size_t est = BINARY_HEADER_SIZE
-        + 512  // metadata (file_path, hashes, etc.)
-        + 128  // axes
-        + frames_.size() * (64 + num_frequency_bins() * 12);  // per-frame header + mag/phs/pwr
+    // Rough reserve — header + metadata + axes + frames (mag/phs/pwr +
+    // reassigned pair). Avoids repeated realloc during append.
+    const size_t est = BINARY_HEADER_SIZE + 1024 +
+                        frames_.size() * (80 + num_frequency_bins() * 20);
     out.reserve(est);
 
     // Header
@@ -780,11 +921,11 @@ bool SpectralDataset::serialize_binary(std::vector<uint8_t>& out) const {
     // Compute checksum over payload
     const uint64_t checksum = fnv1a_64(out.data() + payload_start, payload_size);
 
-    // Patch header fields: payload size and checksum
-    uint64_t ps_le = payload_size;
-    uint64_t cs_le = checksum;
-    std::memcpy(out.data() + 12, &ps_le, sizeof(uint64_t));
-    std::memcpy(out.data() + 20, &cs_le, sizeof(uint64_t));
+    // Patch header fields: payload size and checksum (explicit LE).
+    for (int i = 0; i < 8; ++i) {
+        out[12 + i] = static_cast<uint8_t>(payload_size >> (8 * i));
+        out[20 + i] = static_cast<uint8_t>(checksum >> (8 * i));
+    }
 
     if (out.size() > MAX_DATASET_SIZE) return false;
     return true;
@@ -798,10 +939,12 @@ bool SpectralDataset::deserialize_binary(const uint8_t* data, size_t size) {
     size_t off = 0;
     if (!read_header(data, size, off)) return false;
 
-    // Read claimed payload size + checksum
+    // Read claimed payload size + checksum (explicit LE).
     uint64_t payload_size = 0, claimed_checksum = 0;
-    std::memcpy(&payload_size, data + 12, sizeof(uint64_t));
-    std::memcpy(&claimed_checksum, data + 20, sizeof(uint64_t));
+    for (int i = 0; i < 8; ++i) {
+        payload_size |= static_cast<uint64_t>(data[12 + i]) << (8 * i);
+        claimed_checksum |= static_cast<uint64_t>(data[20 + i]) << (8 * i);
+    }
     if (payload_size > size - BINARY_HEADER_SIZE) return false;
     if (BINARY_HEADER_SIZE + payload_size > size) return false;
 
@@ -816,6 +959,12 @@ bool SpectralDataset::deserialize_binary(const uint8_t* data, size_t size) {
     if (!read_frames(data, BINARY_HEADER_SIZE + payload_size, off)) return false;
 
     return true;
+}
+
+std::string SpectralDataset::dataset_identity() const {
+    std::vector<uint8_t> buf;
+    if (!serialize_binary(buf)) return {};
+    return sha256_hex(buf.data(), buf.size());
 }
 
 // ============================================================================
@@ -943,6 +1092,18 @@ std::string SpectralDataset::serialize_json(bool pretty) const {
         for (size_t k = 0; k < f.power.size(); ++k) {
             if (k) os << ",";
             os << fp_to_string(f.power[k]);
+        }
+        os << "],\n";
+        os << "      \"reassigned_times\": [";
+        for (size_t k = 0; k < f.reassigned_times.size(); ++k) {
+            if (k) os << ",";
+            os << fp_to_string(f.reassigned_times[k]);
+        }
+        os << "],\n";
+        os << "      \"reassigned_freqs\": [";
+        for (size_t k = 0; k < f.reassigned_freqs.size(); ++k) {
+            if (k) os << ",";
+            os << fp_to_string(f.reassigned_freqs[k]);
         }
         os << "]\n";
         os << "    }" << (i + 1 < frames_.size() ? "," : "") << "\n";
@@ -1304,6 +1465,8 @@ bool SpectralDataset::deserialize_json(const std::string& json) {
             f.magnitudes = extract_array_floats(fget("magnitudes"));
             f.phases = extract_array_floats(fget("phases"));
             f.power = extract_array_floats(fget("power"));
+            f.reassigned_times = extract_array_floats(fget("reassigned_times"));
+            f.reassigned_freqs = extract_array_floats(fget("reassigned_freqs"));
             frames_.push_back(std::move(f));
         }
     }

@@ -203,6 +203,15 @@ static std::vector<float> window_blackman(int N) {
 // Coherent gain of a window
 // ---------------------------------------------------------------------
 
+// Energy gain: sum(w^2) / N — measures noise-power preservation.
+static float window_energy_gain(const std::vector<float>& w) {
+    int N = static_cast<int>(w.size());
+    if (N <= 0) return 0.0f;
+    double sum = 0.0;
+    for (float v : w) sum += static_cast<double>(v) * v;
+    return static_cast<float>(sum / N);
+}
+
 // Coherent gain: sum(w) / N — measures amplitude preservation
 static float window_coherent_gain(const std::vector<float>& w) {
     int N = static_cast<int>(w.size());
