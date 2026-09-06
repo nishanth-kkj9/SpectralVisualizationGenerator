@@ -609,6 +609,21 @@ set_target_properties(test_equivalence PROPERTIES
     WIN32_EXECUTABLE OFF
 )
 
+# S4-D3: previously built but never executed. Takes an input wav; with a
+# missing name it generates a fallback sine so CTest always has input.
+add_test(NAME equivalence COMMAND test_equivalence eq_input.wav)
+
+add_executable(test_config_validation
+    tests/cli/test_config_validation.cpp
+)
+target_link_libraries(test_config_validation PRIVATE SpectralCore)
+set_target_properties(test_config_validation PROPERTIES
+    CXX_VISIBILITY_PRESET "hidden"
+    CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
+    WIN32_EXECUTABLE OFF
+)
+add_test(NAME config_validation COMMAND test_config_validation)
+
 if(DEFINED ENV{VCPKG_ROOT})
     set(CMAKE_TOOLCHAIN_FILE "${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
     list(APPEND CMAKE_PREFIX_PATH "${VCPKG_ROOT}/installed")

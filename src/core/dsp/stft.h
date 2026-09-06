@@ -85,13 +85,14 @@ inline std::vector<StftFrame> stft_all(const float* audio, int total, int n_fft,
     return frames;
 }
 
-// Window selector shared by CLI/pipeline/tests. Unknown names fall back
-// to Hann (callers validate user input separately via validate_config).
+// Window selector shared by pipeline/tests. Unknown names yield an empty
+// vector (fail-closed; stft_frame rejects it). No Hann fallback.
 inline std::vector<float> stft_window(const std::string& type, int n) {
     if (type == "hamming") return window_hamming(n);
     if (type == "blackman") return window_blackman(n);
     if (type == "rectangular") return window_rectangular(n);
-    return window_hann(n);
+    if (type == "hann") return window_hann(n);
+    return {};
 }
 
 } // namespace Spectral

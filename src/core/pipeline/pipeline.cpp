@@ -23,13 +23,29 @@ static void report(const ProgressFn& p, float f, const char* stage) {
     if (p) p(f, stage);
 }
 
+static bool is_supported_window(const std::string& type) {
+    return type == "hann" || type == "hamming" || type == "blackman" ||
+           type == "rectangular";
+}
+
 std::string validate_config(const GenerateConfig& cfg) {
     if (cfg.input_path.empty()) return "no input file";
     if (cfg.output_path.empty()) return "no output file";
     if (cfg.visualization != "spectrogram" && cfg.visualization != "spectrum")
         return "visualization must be spectrogram or spectrum";
-    if (cfg.fft_size <= 0 || (cfg.fft_size & (cfg.fft_size - 1)) != 0)
-        return "fft must be a positive power of 2";
+    if (cfg.fft_size < 2 || (cfg.fft_size & (cfg.fft_size - 1)) != 0)
+        return "fft must be a power of 2 >= 2";
+    if (!is_supported_window(cfg.window))
+        return "invalid window: '" + cfg.window +
+               "'. supported windows: hann, hamming, blackman, rectangular";
+    // hop == 0 means fft_size / 2 (normalized by callers). Anything else
+    // must be an explicit positive step within one window: negative hops
+    // would run the STFT loop backwards, and hops past fft_size would
+    // silently skip input between windows. Neither is supported.
+    if (cfg.hop_size < 0)
+        return "hop-size must be >= 0 (0 = fft-size / 2)";
+    if (cfg.hop_size > cfg.fft_size)
+        return "hop-size must be <= fft-size (gapped windows unsupported)";
     if (cfg.width <= 0 || cfg.height <= 0) return "resolution must be positive";
     if (cfg.db_range <= 0) return "db-range must be > 0";
     if (cfg.output_format != "image" && cfg.output_format != "video")
@@ -50,11 +66,14 @@ static FrequencyScale parse_freq_scale(const std::string& s) {
     return FrequencyScale::Logarithmic;
 }
 
+// Fail-closed: unknown names yield an empty window, which stft_frame
+// rejects. Unreachable via validate_config, but no silent Hann fallback.
 static std::vector<float> make_window(const std::string& type, int n) {
     if (type == "hamming")     return window_hamming(n);
     if (type == "blackman")    return window_blackman(n);
     if (type == "rectangular") return window_rectangular(n);
-    return window_hann(n);
+    if (type == "hann")        return window_hann(n);
+    return {};
 }
 
 Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
