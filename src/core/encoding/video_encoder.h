@@ -3,6 +3,8 @@
 // Phase 10 — Video encoder via ffmpeg subprocess.
 // Pipes raw RGBA frames to ffmpeg stdin for encoding.
 
+#include "process/safe_process.h"
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -46,10 +48,10 @@ public:
     // Finalize and close the ffmpeg process.
     VideoEncoderError close();
 
-    bool is_open() const { return pipe_ != nullptr; }
+    bool is_open() const;
 
 private:
-    FILE* pipe_ = nullptr;
+    SafeProcess proc_;
     VideoEncoderConfig cfg_;
     int64_t frames_written_ = 0;
 };

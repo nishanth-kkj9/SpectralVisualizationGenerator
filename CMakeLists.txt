@@ -16,6 +16,7 @@ add_library(SpectralCore STATIC
     src/core/encoding/video_renderer.cpp
     src/core/media/media_decoder.cpp
     src/core/pipeline/pipeline.cpp
+    src/core/process/safe_process.cpp
     src/core/project/project_config.cpp
     src/core/rendering/d3d11_context.cpp
     src/core/rendering/gpu_spectrogram.cpp
@@ -34,6 +35,7 @@ target_include_directories(SpectralCore PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/encoding>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/media>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/pipeline>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/process>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/project>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/rendering>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/spectral>
@@ -176,6 +178,28 @@ add_executable(media_probe
     apps/media-probe/main.cpp
 )
 target_link_libraries(media_probe PRIVATE SpectralCore)
+
+add_executable(test_audio_buffer
+    tests/audio/test_audio_buffer.cpp
+)
+target_link_libraries(test_audio_buffer PRIVATE SpectralCore)
+set_target_properties(test_audio_buffer PROPERTIES
+    CXX_VISIBILITY_PRESET "hidden"
+    CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
+    WIN32_EXECUTABLE OFF
+)
+add_test(NAME audio_buffer COMMAND test_audio_buffer)
+
+add_executable(test_media
+    tests/media/test_media_decoder.cpp
+)
+target_link_libraries(test_media PRIVATE SpectralCore)
+set_target_properties(test_media PROPERTIES
+    CXX_VISIBILITY_PRESET "hidden"
+    CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
+    WIN32_EXECUTABLE OFF
+)
+add_test(NAME media_decoder COMMAND test_media)
 
 set_target_properties(media_probe PROPERTIES
     CXX_VISIBILITY_PRESET "hidden"

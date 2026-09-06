@@ -1,205 +1,313 @@
 #include "media_decoder.h"
 
-#include <vector>
-#include <string>
-#include <stdexcept>
-#include <cstdio>
-#include <cstdlib>
-#include <sstream>
-#include <algorithm>
-#include <atomic>
+#include "process/safe_process.h"
+
 #include <cmath>
-#include <fstream>
-#include <filesystem>
-#include <thread>
+#include <sstream>
 
-// Helper: run a command via _popen and capture stdout (Windows)
-static std::string run_popen(const std::vector<std::string>& cmd, int /*timeout_sec*/ = 30) {
-    std::string result;
+// S3 — streaming decode. ffmpeg stdout (s16le PCM pipe) is parsed in
+// bounded chunks; at most one chunk + one pipe buffer is ever in RAM.
 
-    // Build command line string
-    std::string cmdline;
-    for (const auto& arg : cmd) {
-        if (arg.find(' ') != std::string::npos ||
-            arg.find('"') != std::string::npos ||
-            arg.find('&') != std::string::npos) {
-            cmdline += "\"";
-            for (const auto& ch : arg) {
-                if (ch == '"') cmdline += "\"";
-                else cmdline += ch;
+namespace {
+
+constexpr size_t kPipeReadBytes = 65536;
+
+struct StreamInfo {
+    int index = -1;
+    std::string codec_type;
+    std::string codec;
+    int sample_rate = 0;
+    int channels = 0;
+    double duration = 0.0;
+    bool has_duration = false;
+    double start = 0.0;
+};
+
+// Minimal parser for ffprobe flat output (order-independent key=value,
+// no JSON dependency). Lines look like:
+//   streams.stream.0.codec_type="audio"
+static std::string unquote(const std::string& v) {
+    if (v.size() >= 2 && v.front() == '"' && v.back() == '"')
+        return v.substr(1, v.size() - 2);
+    return v;
+}
+
+bool parse_stream_flat(const std::string& out, std::vector<StreamInfo>& streams) {
+    const std::string pre = "streams.stream.";
+    std::istringstream lines(out);
+    std::string line;
+    auto ensure = [&](int idx) -> StreamInfo& {
+        while (static_cast<int>(streams.size()) <= idx) streams.push_back(StreamInfo{});
+        streams[static_cast<size_t>(idx)].index = idx;
+        return streams[static_cast<size_t>(idx)];
+    };
+    while (std::getline(lines, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.compare(0, pre.size(), pre) != 0) continue;
+        size_t dot = line.find('.', pre.size());
+        size_t eq = line.find('=', dot == std::string::npos ? 0 : dot);
+        if (dot == std::string::npos || eq == std::string::npos) continue;
+        int idx = -1;
+        try {
+            idx = std::stoi(line.substr(pre.size(), dot - pre.size()));
+        } catch (...) {
+            continue;
+        }
+        if (idx < 0 || idx > 64) continue;
+        std::string key = line.substr(dot + 1, eq - dot - 1);
+        std::string val = unquote(line.substr(eq + 1));
+        StreamInfo& si = ensure(idx);
+        // Nested keys (e.g. disposition.default) land here whole; only
+        // top-level stream attributes are consumed.
+        if (key == "codec_type") si.codec_type = val;
+        else if (key == "codec_name") si.codec = val;
+        else if (key == "sample_rate") {
+            try { si.sample_rate = std::stoi(val); } catch (...) {}
+        } else if (key == "channels") {
+            try { si.channels = std::stoi(val); } catch (...) {}
+        } else if (key == "duration" && val != "N/A") {
+            try {
+                si.duration = std::stod(val);
+                si.has_duration = std::isfinite(si.duration) && si.duration > 0.0;
+            } catch (...) {
             }
-            cmdline += "\" ";
-        }
-        else {
-            cmdline += arg + " ";
+        } else if (key == "start_time" && val != "N/A") {
+            try {
+                si.start = std::stod(val);
+                if (!std::isfinite(si.start)) si.start = 0.0;
+            } catch (...) {
+            }
         }
     }
-    if (!cmdline.empty()) cmdline.pop_back();
+    return true;
+}
 
-    FILE* pipe = _popen(cmdline.c_str(), "r");
-    if (!pipe) { return result; }
-
-    char buf[4096];
-    while (fgets(buf, (int)sizeof(buf), pipe) != nullptr) {
-        result += buf;
+bool run_capture(Spectral::SafeProcess& proc, const std::string& exe,
+                 const std::vector<std::string>& argv, std::string& out) {
+    Spectral::SafeProcess::Options opts;
+    opts.capture_stdout = true;
+    opts.capture_stderr = true;
+    if (!proc.spawn(exe, argv, opts)) return false;
+    std::vector<uint8_t> buf(65536);
+    for (;;) {
+        size_t n = proc.read_stdout(buf.data(), buf.size());
+        if (n == static_cast<size_t>(-1)) return false;
+        if (n == 0) break;
+        out.append(reinterpret_cast<const char*>(buf.data()), n);
     }
-    _pclose(pipe);
-    return result;
+    return proc.wait() == 0;
 }
 
-// FFmpeg probe wrapper (subprocess via _popen)
-static std::string ffprobe(const std::string& filepath,
-    const std::string& arg,
-    const std::string& binary = "ffprobe") {
-    std::vector<std::string> cmd = { binary, "-v", "quiet", "-print_format", "json",
-        "-show_entries", arg, filepath };
-    return run_popen(cmd);
-}
+} // namespace
 
-// FFmpeg decode wrapper (subprocess via _popen)
-static std::string ffmpeg(const std::string& filepath,
-    const std::string& args,
-    const std::string& binary = "ffmpeg") {
-    std::vector<std::string> cmd = { binary, "-v", "quiet", "-i", filepath, args };
-    return run_popen(cmd);
-}
-
-// ====================================================================
-// MediaDecoder implementation: FFmpeg subprocess-based
-// ====================================================================
-
-bool MediaDecoder::open(const std::string& filepath) {
+bool MediaDecoder::open(const std::string& filepath, const DecodeOptions& opts) {
+    close();
     filepath_ = filepath;
-    format_open_ = false;
-    audio_stream_idx_ = -1;
-    sample_rate_ = 0;
-    channel_count_ = 2;
-    frame_count_ = 0;
-    duration_sec_ = 0.0;
+    opts_ = opts;
+    if (opts_.chunk_frames == 0) opts_.chunk_frames = 4096;
+    if (!probe(filepath)) return false;
 
-    // Use ffprobe to check file and find audio streams
-    std::string probe = ffprobe(filepath, "streams");
-    if (probe.empty()) { return false; }
-
-    // Look for audio stream marker (ffprobe outputs with or without spaces around colon)
-    size_t amarker = probe.find("\"codec_type\"");
-    if (amarker == std::string::npos) { return false; }
-    size_t amarker_val = probe.find("audio", amarker);
-    if (amarker_val == std::string::npos) { return false; }  // No audio stream
-
-    // Look for duration
-    size_t dpos = probe.find("\"duration\"");
-    if (dpos != std::string::npos) {
-        size_t colon = probe.find(':', dpos);
-        size_t vpos = probe.find('"', colon + 1);
-        size_t vpos2 = probe.find('"', vpos + 1);
-        if (vpos2 != std::string::npos) {
-            std::string dur_str = probe.substr(vpos + 1, vpos2 - vpos - 1);
-            try { duration_sec_ = std::stod(dur_str); } catch (...) {}
-        }
+    ffmpeg_path_ = Spectral::resolve_tool("ffmpeg");
+    const int out_rate = opts_.target_rate > 0 ? opts_.target_rate : sample_rate_;
+    // Global stream index (0:N), NOT the audio-relative ordinal:
+    // 0:a:1 would mean the *second* audio stream.
+    std::vector<std::string> argv = {
+        "-v", "error", "-i", filepath_,
+        "-map", "0:" + std::to_string(audio_stream_idx_),
+    };
+    if (opts_.target_rate > 0) {
+        argv.push_back("-ar");
+        argv.push_back(std::to_string(opts_.target_rate));
     }
+    argv.insert(argv.end(), {"-f", "s16le", "-acodec", "pcm_s16le", "-vn", "-"});
 
-    // Look for sample rate
-    size_t spos = probe.find("\"sample_rate\"");
-    if (spos != std::string::npos) {
-        size_t colon = probe.find(':', spos);
-        size_t vpos = probe.find('"', colon + 1);
-        size_t vpos2 = probe.find('"', vpos + 1);
-        if (vpos2 != std::string::npos) {
-            std::string sr_str = probe.substr(vpos + 1, vpos2 - vpos - 1);
-            try { sample_rate_ = std::stoi(sr_str); } catch (...) {}
-        }
+    Spectral::SafeProcess::Options popts;
+    popts.capture_stdout = true;
+    popts.capture_stderr = true;
+    if (!proc_.spawn(ffmpeg_path_, argv, popts)) {
+        last_error_ = "media: cannot start decoder (" + proc_.last_error() + ")";
+        close();
+        return false;
     }
-
-    // Audio stream confirmed by ffprobe
-    audio_stream_idx_ = 0;
+    effective_rate_ = out_rate;
     format_open_ = true;
     return true;
 }
 
+bool MediaDecoder::probe(const std::string& filepath) {
+    ffprobe_path_ = Spectral::resolve_tool("ffprobe");
+    Spectral::SafeProcess proc;
+    std::vector<std::string> argv = {
+        "-v", "error",
+        "-show_entries", "stream=index,codec_type,codec_name,sample_rate,channels,duration,start_time",
+        "-of", "flat", filepath,
+    };
+    std::string out;
+    if (!run_capture(proc, ffprobe_path_, argv, out)) {
+        if (out.empty())
+            last_error_ = "media: ffprobe failed for '" + filepath + "' (" +
+                          proc.last_error() + "; stderr: " + proc.stderr_text() + ")";
+        else
+            last_error_ = "media: ffprobe exited nonzero for '" + filepath +
+                          "'; stderr: " + proc.stderr_text();
+        // Distinguish "tool missing" from "bad file": empty output + spawn
+        // failure means the tool never ran.
+        return false;
+    }
+    // Deterministic policy: lowest-index audio stream wins. Documented in
+    // docs/media-ingestion.md; multi-stream files report their index.
+    std::vector<StreamInfo> streams;
+    parse_stream_flat(out, streams);
+    bool found = false;
+    StreamInfo best;
+    for (const auto& si : streams) {
+        if (si.codec_type != "audio") continue;
+        if (si.sample_rate <= 0 || si.channels <= 0) continue;
+        if (!found || si.index < best.index) {
+            best = si;
+            found = true;
+        }
+    }
+    if (!found) {
+        last_error_ = "media: no audio stream in '" + filepath + "'";
+        return false;
+    }
+    audio_stream_idx_ = best.index;
+    codec_ = best.codec;
+    sample_rate_ = best.sample_rate;
+    channel_count_ = best.channels;
+    start_time_ = best.start;
+    if (best.has_duration) {
+        duration_sec_ = best.duration;
+        duration_known_ = true;
+    } else {
+        // Fall back to container duration before giving up on timing.
+        Spectral::SafeProcess fproc;
+        std::vector<std::string> fargv = {"-v", "error",
+                                          "-show_entries", "format=duration",
+                                          "-of", "flat", filepath};
+        std::string fout;
+        if (run_capture(fproc, ffprobe_path_, fargv, fout)) {
+            const std::string key = "format.duration=";
+            size_t pos = fout.find(key);
+            if (pos != std::string::npos) {
+                std::string val = fout.substr(pos + key.size());
+                size_t end = val.find_first_of("\r\n");
+                if (end != std::string::npos) val.resize(end);
+                // strip quotes
+                if (val.size() >= 2 && val.front() == '"' && val.back() == '"')
+                    val = val.substr(1, val.size() - 2);
+                try {
+                    double d = std::stod(val);
+                    if (std::isfinite(d) && d > 0.0) {
+                        duration_sec_ = d;
+                        duration_known_ = true;
+                    }
+                } catch (...) {
+                }
+            }
+        }
+    }
+    return true;
+}
+
 void MediaDecoder::close() {
+    proc_.kill();
+    filepath_.clear();
     format_open_ = false;
     audio_stream_idx_ = -1;
+    codec_.clear();
     sample_rate_ = 0;
-    channel_count_ = 2;
-    frame_count_ = 0;
+    channel_count_ = 0;
+    effective_rate_ = 0;
+    start_time_ = 0.0;
     duration_sec_ = 0.0;
+    duration_known_ = false;
+    delivered_frames_ = 0;
+    eof_seen_ = false;
+    eof_clean_ = false;
+    failed_ = false;
+    last_error_.clear();
+    staging_.clear();
 }
 
 bool MediaDecoder::read_frame(AudioFrame& frame) {
-    if (!format_open_ || audio_stream_idx_ == -1) { return false; }
+    frame = AudioFrame{};
+    if (!format_open_ || failed_ || eof_seen_) return false;
 
-    // Only decode once — after that, return false
-    if (frame_count_ > 0) { return false; }
-
-    // Write ffmpeg output to temp file (avoids _popen text-mode corruption of binary data)
-    // ponytail: unique per call — parallel batch decodes shared one fixed name and clobbered it
-    static std::atomic<unsigned long long> decode_seq{0};
-    std::ostringstream tmp_name;
-    tmp_name << "spectragen_decode_" << std::this_thread::get_id() << "_"
-             << decode_seq.fetch_add(1) << ".tmp";
-    auto tmp = std::filesystem::temp_directory_path() / tmp_name.str();
-    std::string tmp_str = tmp.string();
-
-    // Build ffmpeg command to write s16le to temp file
-    std::string cmdline = "ffmpeg -v quiet -y -i \"" + filepath_ +
-        "\" -map 0:a:0 -f s16le -ac 2 -vn \"" + tmp_str + "\"";
-    std::system(cmdline.c_str());
-
-    // Read binary temp file
-    std::ifstream ifs(tmp, std::ios::binary);
-    if (!ifs.is_open()) { return false; }
-
-    ifs.seekg(0, std::ios::end);
-    auto file_size = ifs.tellg();
-    ifs.seekg(0, std::ios::beg);
-
-    if (file_size <= 0) {
-        std::filesystem::remove(tmp);
-        return false;
+    const size_t want_frames = opts_.chunk_frames;
+    const size_t want_bytes = want_frames * static_cast<size_t>(channel_count_) * 2;
+    std::vector<uint8_t> buf(65536);
+    bool eof = false;
+    while (staging_.size() < want_bytes && !eof) {
+        size_t n = proc_.read_stdout(buf.data(), buf.size());
+        if (n == static_cast<size_t>(-1)) {
+            failed_ = true;
+            last_error_ = "media: decode pipe error for '" + filepath_ + "'";
+            return false;
+        }
+        if (n == 0) {
+            eof = true;
+            break;
+        }
+        staging_.insert(staging_.end(), buf.begin(), buf.begin() + n);
     }
-
-    std::string raw(static_cast<size_t>(file_size), '\0');
-    ifs.read(raw.data(), file_size);
-    ifs.close();
-    std::filesystem::remove(tmp);
-
-    if (raw.empty()) { return false; }
-
-    // Parse 16-bit signed interleaved samples, convert to float [-1, 1]
-    // Interleaved: s0_ch0, s0_ch1, s1_ch0, s1_ch1, ...
-    size_t num_samples = raw.size() / (2 * channel_count_);  // 2 bytes per sample
-    frame.samples.resize(num_samples * channel_count_);
-    frame.sample_rate = sample_rate_;
-    frame.num_channels = channel_count_;
-    frame.timestamp = duration_sec_ > 0.0 ? (frame_count_ * duration_sec_ / std::max(frame_count_, 1)) : 0.0;
-
-    for (size_t ch = 0; ch < (size_t)channel_count_; ++ch) {
-        for (size_t i = 0; i < num_samples; ++i) {
-            short sval = 0;
-            const uint8_t* byte_ptr = reinterpret_cast<const uint8_t*>(raw.data()) +
-                (ch * num_samples + i) * 2;
-            // Little-endian on Windows
-            sval = (short)((byte_ptr[1] << 8) | byte_ptr[0]);
-
-            float fval = static_cast<float>(sval) / 32768.0f;
-            if (fval > 1.0f) fval = 1.0f;
-            if (fval < -1.0f) fval = -1.0f;
-
-            frame.samples[ch * num_samples + i] = fval;
+    if (eof) {
+        eof_seen_ = true;
+        int code = proc_.wait();
+        if (code != 0) {
+            failed_ = true;
+            std::string tail = proc_.stderr_text();
+            if (tail.size() > 500) tail = tail.substr(tail.size() - 500);
+            last_error_ = "media: ffmpeg exited with code " + std::to_string(code) +
+                          " for '" + filepath_ + "'; stderr: " + tail;
+        } else {
+            eof_clean_ = true;
+        }
+        // Misaligned tail (not a whole sample) is dropped, never fabricated.
+        size_t complete = (staging_.size() / 2) * 2;
+        if (staging_.size() != complete) {
+            staging_.resize(complete);
+            if (code == 0)
+                last_error_ = "media: dropped truncated trailing sample";
         }
     }
-
-    frame_count_++;
+    const size_t frame_bytes = 2 * static_cast<size_t>(channel_count_);
+    size_t have_frames = frame_bytes ? staging_.size() / frame_bytes : 0;
+    if (have_frames > want_frames) have_frames = want_frames;
+    if (have_frames == 0) {
+        // Clean EOF with nothing left, or a failed decode: no more data.
+        // A nonzero exit with zero delivered samples is a hard failure
+        // (failed_ already set above); clean EOF just ends the stream.
+        return false;
+    }
+    frame.sample_rate = effective_rate_;
+    frame.num_channels = channel_count_;
+    frame.timestamp = start_time_ + static_cast<double>(delivered_frames_) /
+                                        static_cast<double>(effective_rate_ > 0 ? effective_rate_ : 1);
+    frame.samples.resize(have_frames * static_cast<size_t>(channel_count_));
+    const uint8_t* raw = staging_.data();
+    for (size_t i = 0; i < have_frames * static_cast<size_t>(channel_count_); ++i) {
+        int sval = static_cast<int>(raw[2 * i]) | (static_cast<int>(raw[2 * i + 1]) << 8);
+        if (sval >= 32768) sval -= 65536;
+        float fval = static_cast<float>(sval) / 32768.0f;
+        if (fval > 1.0f) fval = 1.0f;
+        if (fval < -1.0f) fval = -1.0f;
+        frame.samples[i] = fval;
+    }
+    staging_.erase(staging_.begin(),
+                   staging_.begin() + have_frames * frame_bytes);
+    delivered_frames_ += static_cast<int64_t>(have_frames);
     return true;
 }
 
 int64_t MediaDecoder::total_frames() const {
-    return duration_sec_ > 0.0 ? (int64_t)(duration_sec_ * sample_rate_) : 0;
+    if (eof_clean_) return delivered_frames_;
+    if (duration_known_ && effective_rate_ > 0)
+        return static_cast<int64_t>(duration_sec_ * effective_rate_);
+    return delivered_frames_;
 }
 
-double MediaDecoder::duration() const { return duration_sec_; }
-
-int MediaDecoder::sample_rate() const { return sample_rate_; }
-
-int MediaDecoder::num_channels() const { return channel_count_; }
+bool MediaDecoder::total_frames_known() const {
+    return eof_clean_;
+}

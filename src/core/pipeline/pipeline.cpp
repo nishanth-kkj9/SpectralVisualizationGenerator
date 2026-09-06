@@ -66,9 +66,11 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
 
     report(progress, 0.0f, "decode");
     MediaDecoder decoder;
-    if (!decoder.open(cfg.input_path))
-        return Error::make(Subsystem::Media, JobError::FileNotFound,
-                           "media: cannot open '" + cfg.input_path + "'");
+    if (!decoder.open(cfg.input_path)) {
+        std::string why = decoder.last_error();
+        if (why.empty()) why = "media: cannot open '" + cfg.input_path + "'";
+        return Error::make(Subsystem::Media, JobError::FileNotFound, why);
+    }
     int sr = decoder.sample_rate();
     if (sr <= 0)
         return Error::make(Subsystem::Media, JobError::DecodeError,
@@ -90,7 +92,16 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
             }
         }
     }
+    const bool decode_failed = decoder.failed();
+    const std::string decode_err = decoder.last_error();
     decoder.close();
+    // A failed decode is never a silent success, even with partial audio.
+    if (decode_failed) {
+        std::string why = decode_err.empty()
+                                ? "media: decode failed for '" + cfg.input_path + "'"
+                                : decode_err;
+        return Error::make(Subsystem::Media, JobError::DecodeError, why);
+    }
     if (audio.empty())
         return Error::make(Subsystem::Media, JobError::DecodeError,
                            "media: decoded 0 audio samples from '" + cfg.input_path + "'");
