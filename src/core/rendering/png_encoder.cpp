@@ -207,7 +207,6 @@ bool PNGEncoder::read_rgba(const std::string& path,
             const size_t deflate_end = static_cast<size_t>(len) - 4;
             while (off < deflate_end) {
                 if (off + 5 > deflate_end) {
-                    std::fprintf(stderr, "DBG: off+5 > deflate_end: off=%zu de=%zu\n", off, deflate_end);
                     return false;
                 }
                 const uint8_t hdr = chunk_data[off++];
@@ -217,15 +216,12 @@ bool PNGEncoder::read_rgba(const std::string& path,
                     chunk_data[off + 2] | (chunk_data[off + 3] << 8));
                 off += 4;
                 if (static_cast<uint16_t>(~L) != N) {
-                    std::fprintf(stderr, "DBG: NLEN mismatch: L=%u ~L=%u N=%u\n", L, (uint16_t)(~L), N);
                     return false;
                 }
                 if ((hdr >> 1) & 0x03) {
-                    std::fprintf(stderr, "DBG: BTYPE != 0: %u\n", (unsigned)((hdr >> 1) & 3));
                     return false;
                 }
                 if (off + L > deflate_end) {
-                    std::fprintf(stderr, "DBG: off+L > deflate_end: off=%zu L=%u de=%zu\n", off, L, deflate_end);
                     return false;
                 }
                 raw_scanlines.insert(raw_scanlines.end(),

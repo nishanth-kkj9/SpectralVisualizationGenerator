@@ -8,9 +8,35 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE "Debug")
 endif()
 
-add_library(SpectralCore INTERFACE)
-target_include_directories(SpectralCore INTERFACE
+# S2 — one authoritative compiled core. All production .cpps live here;
+# apps/tests/benchmarks link SpectralCore instead of recompiling them.
+add_library(SpectralCore STATIC
+    src/core/batch/batch.cpp
+    src/core/encoding/video_encoder.cpp
+    src/core/encoding/video_renderer.cpp
+    src/core/media/media_decoder.cpp
+    src/core/pipeline/pipeline.cpp
+    src/core/project/project_config.cpp
+    src/core/rendering/d3d11_context.cpp
+    src/core/rendering/gpu_spectrogram.cpp
+    src/core/rendering/png_encoder.cpp
+    src/core/rendering/spectrogram_renderer.cpp
+    src/core/rendering/spectrum_renderer.cpp
+    src/core/spectral/multiband_analyzer.cpp
+    src/core/spectral/spectral_dataset.cpp
+)
+target_include_directories(SpectralCore PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/audio>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/batch>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/encoding>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/media>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/pipeline>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/project>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/rendering>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/spectral>
     $<INSTALL_INTERFACE:include>
 )
 
@@ -22,18 +48,6 @@ endif()
 
 add_executable(spectragen
     apps/spectragen/main.cpp
-    src/core/pipeline/pipeline.cpp
-    src/core/batch/batch.cpp
-    src/core/media/media_decoder.cpp
-    src/core/spectral/spectral_dataset.cpp
-    src/core/spectral/multiband_analyzer.cpp
-    src/core/rendering/spectrogram_renderer.cpp
-    src/core/rendering/gpu_spectrogram.cpp
-    src/core/rendering/d3d11_context.cpp
-    src/core/rendering/spectrum_renderer.cpp
-    src/core/rendering/png_encoder.cpp
-    src/core/encoding/video_encoder.cpp
-    src/core/encoding/video_renderer.cpp
 )
 target_include_directories(spectragen PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
@@ -45,7 +59,7 @@ target_include_directories(spectragen PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/batch>
 )
 target_compile_definitions(spectragen PRIVATE NOMINMAX)
-target_link_libraries(spectragen PRIVATE SpectralCore d3d11 d3dcompiler)
+target_link_libraries(spectragen PRIVATE SpectralCore)
 
 set_target_properties(spectragen PROPERTIES
     CXX_VISIBILITY_PRESET "hidden"
@@ -65,17 +79,6 @@ if(Qt6_FOUND)
         apps/spectrascope/main.cpp
         apps/spectrascope/main_window.cpp
         apps/spectrascope/worker.cpp
-        src/core/pipeline/pipeline.cpp
-        src/core/media/media_decoder.cpp
-        src/core/spectral/spectral_dataset.cpp
-        src/core/spectral/multiband_analyzer.cpp
-        src/core/rendering/spectrogram_renderer.cpp
-        src/core/rendering/gpu_spectrogram.cpp
-        src/core/rendering/d3d11_context.cpp
-        src/core/rendering/spectrum_renderer.cpp
-        src/core/rendering/png_encoder.cpp
-        src/core/encoding/video_encoder.cpp
-        src/core/encoding/video_renderer.cpp
     )
     target_include_directories(spectra_gui PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp
@@ -87,7 +90,7 @@ if(Qt6_FOUND)
         ${CMAKE_CURRENT_SOURCE_DIR}/apps/spectrascope
     )
     target_compile_definitions(spectra_gui PRIVATE NOMINMAX)
-    target_link_libraries(spectra_gui PRIVATE SpectralCore Qt6::Widgets d3d11 d3dcompiler)
+    target_link_libraries(spectra_gui PRIVATE SpectralCore Qt6::Widgets)
     set_target_properties(spectra_gui PROPERTIES
         CXX_VISIBILITY_PRESET "hidden"
         CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
@@ -134,15 +137,6 @@ add_executable(spectral_benchmarks
     src/benchmarks/bench_video_rendering.cpp
     src/benchmarks/bench_backend.cpp
     src/benchmarks/bench_gpu_render.cpp
-    src/core/spectral/spectral_dataset.cpp
-    src/core/spectral/multiband_analyzer.cpp
-    src/core/rendering/spectrogram_renderer.cpp
-    src/core/rendering/gpu_spectrogram.cpp
-    src/core/rendering/d3d11_context.cpp
-    src/core/rendering/png_encoder.cpp
-    src/core/media/media_decoder.cpp
-    src/core/encoding/video_encoder.cpp
-    src/core/encoding/video_renderer.cpp
 )
 target_include_directories(spectral_benchmarks PRIVATE
     ${CMAKE_SOURCE_DIR}/src/core
@@ -154,7 +148,7 @@ target_include_directories(spectral_benchmarks PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 target_compile_definitions(spectral_benchmarks PRIVATE NOMINMAX)
-target_link_libraries(spectral_benchmarks PRIVATE SpectralCore d3d11 d3dcompiler)
+target_link_libraries(spectral_benchmarks PRIVATE SpectralCore)
 
 set_target_properties(spectral_benchmarks PROPERTIES
     CXX_VISIBILITY_PRESET "hidden"
@@ -179,9 +173,9 @@ else()
 endif()
 
 add_executable(media_probe
-    src/core/media/media_decoder.cpp
     apps/media-probe/main.cpp
 )
+target_link_libraries(media_probe PRIVATE SpectralCore)
 
 set_target_properties(media_probe PROPERTIES
     CXX_VISIBILITY_PRESET "hidden"
@@ -209,7 +203,6 @@ install(TARGETS test_fft RUNTIME DESTINATION bin)
 
 # --- --- SpectralDataset (Phase 5) ---
 add_executable(test_spectral_dataset
-    src/core/spectral/spectral_dataset.cpp
     tests/spectral/test_spectral_dataset.cpp
 )
 target_include_directories(test_spectral_dataset PRIVATE
@@ -227,11 +220,6 @@ install(TARGETS test_spectral_dataset RUNTIME DESTINATION bin)
 
 # --- --- Phase 6: SpectrogramRenderer + PNG encoder ---
 add_executable(test_spectrogram_renderer
-    src/core/rendering/png_encoder.cpp
-    src/core/rendering/spectrogram_renderer.cpp
-    src/core/rendering/gpu_spectrogram.cpp
-    src/core/rendering/d3d11_context.cpp
-    src/core/spectral/spectral_dataset.cpp
     tests/rendering/test_spectrogram_renderer.cpp
 )
 target_include_directories(test_spectrogram_renderer PRIVATE
@@ -240,7 +228,7 @@ target_include_directories(test_spectrogram_renderer PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
 )
 target_compile_definitions(test_spectrogram_renderer PRIVATE NOMINMAX)
-target_link_libraries(test_spectrogram_renderer PRIVATE SpectralCore d3d11 d3dcompiler)
+target_link_libraries(test_spectrogram_renderer PRIVATE SpectralCore)
 set_target_properties(test_spectrogram_renderer PROPERTIES
     CXX_VISIBILITY_PRESET "hidden"
     CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
@@ -252,12 +240,6 @@ install(TARGETS test_spectrogram_renderer RUNTIME DESTINATION bin)
 
 # --- --- Phase 7: SpectrumRenderer ---
 add_executable(test_spectrum_renderer
-    src/core/rendering/png_encoder.cpp
-    src/core/rendering/spectrogram_renderer.cpp
-    src/core/rendering/gpu_spectrogram.cpp
-    src/core/rendering/d3d11_context.cpp
-    src/core/rendering/spectrum_renderer.cpp
-    src/core/spectral/spectral_dataset.cpp
     tests/rendering/test_spectrum_renderer.cpp
 )
 target_include_directories(test_spectrum_renderer PRIVATE
@@ -266,7 +248,7 @@ target_include_directories(test_spectrum_renderer PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
 )
 target_compile_definitions(test_spectrum_renderer PRIVATE NOMINMAX)
-target_link_libraries(test_spectrum_renderer PRIVATE SpectralCore d3d11 d3dcompiler)
+target_link_libraries(test_spectrum_renderer PRIVATE SpectralCore)
 set_target_properties(test_spectrum_renderer PROPERTIES
     CXX_VISIBILITY_PRESET "hidden"
     CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
@@ -278,13 +260,6 @@ install(TARGETS test_spectrum_renderer RUNTIME DESTINATION bin)
 
 # --- --- Phase 8: ProjectConfig (reproducible processing) ---
 add_executable(test_project_config
-    src/core/project/project_config.cpp
-    src/core/spectral/spectral_dataset.cpp
-    src/core/rendering/spectrogram_renderer.cpp
-    src/core/rendering/gpu_spectrogram.cpp
-    src/core/rendering/d3d11_context.cpp
-    src/core/rendering/spectrum_renderer.cpp
-    src/core/rendering/png_encoder.cpp
     tests/cli/test_project_config.cpp
 )
 target_include_directories(test_project_config PRIVATE
@@ -294,7 +269,7 @@ target_include_directories(test_project_config PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
 )
 target_compile_definitions(test_project_config PRIVATE NOMINMAX)
-target_link_libraries(test_project_config PRIVATE SpectralCore d3d11 d3dcompiler)
+target_link_libraries(test_project_config PRIVATE SpectralCore)
 set_target_properties(test_project_config PROPERTIES
     CXX_VISIBILITY_PRESET "hidden"
     CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
@@ -304,36 +279,14 @@ add_test(NAME project_config
 )
 install(TARGETS test_project_config RUNTIME DESTINATION bin)
 
-# --- --- Phase 10: Video encoding + rendering ---
-add_library(spectral_video_encoding STATIC
-    src/core/encoding/video_encoder.cpp
-)
-target_include_directories(spectral_video_encoding PRIVATE
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/encoding>
-)
-target_link_libraries(spectral_video_encoding PRIVATE SpectralCore)
-
-add_library(spectral_video_renderer STATIC
-    src/core/encoding/video_renderer.cpp
-)
-target_include_directories(spectral_video_renderer PRIVATE
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/encoding>
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/rendering>
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/spectral>
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
-)
-target_link_libraries(spectral_video_renderer PRIVATE
-    SpectralCore
-    spectral_video_encoding
-)
-
+# --- --- Phase 10: Video encoding + rendering (in SpectralCore) ---
 add_executable(test_video_encoder
     tests/video/test_video_encoder.cpp
 )
 target_include_directories(test_video_encoder PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/encoding>
 )
-target_link_libraries(test_video_encoder PRIVATE spectral_video_encoding)
+target_link_libraries(test_video_encoder PRIVATE SpectralCore)
 set_target_properties(test_video_encoder PROPERTIES
     CXX_VISIBILITY_PRESET "hidden"
     CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
@@ -342,11 +295,6 @@ add_test(NAME video_encoder COMMAND test_video_encoder)
 
 add_executable(test_video_renderer
     tests/video/test_video_renderer.cpp
-    src/core/spectral/spectral_dataset.cpp
-    src/core/rendering/spectrogram_renderer.cpp
-    src/core/rendering/gpu_spectrogram.cpp
-    src/core/rendering/d3d11_context.cpp
-    src/core/rendering/png_encoder.cpp
 )
 target_include_directories(test_video_renderer PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/encoding>
@@ -355,12 +303,7 @@ target_include_directories(test_video_renderer PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
 )
 target_compile_definitions(test_video_renderer PRIVATE NOMINMAX)
-target_link_libraries(test_video_renderer PRIVATE
-    spectral_video_renderer
-    spectral_video_encoding
-    d3d11
-    d3dcompiler
-)
+target_link_libraries(test_video_renderer PRIVATE SpectralCore)
 set_target_properties(test_video_renderer PROPERTIES
     CXX_VISIBILITY_PRESET "hidden"
     CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
@@ -395,12 +338,6 @@ add_test(NAME frequency_scale COMMAND test_frequency_scale)
 
 add_executable(test_freqscale_render
     tests/rendering/test_freqscale_render.cpp
-    src/core/spectral/spectral_dataset.cpp
-    src/core/rendering/spectrogram_renderer.cpp
-    src/core/rendering/gpu_spectrogram.cpp
-    src/core/rendering/d3d11_context.cpp
-    src/core/rendering/spectrum_renderer.cpp
-    src/core/rendering/png_encoder.cpp
 )
 target_include_directories(test_freqscale_render PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
@@ -408,7 +345,7 @@ target_include_directories(test_freqscale_render PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/spectral>
 )
 target_compile_definitions(test_freqscale_render PRIVATE NOMINMAX)
-target_link_libraries(test_freqscale_render PRIVATE SpectralCore d3d11 d3dcompiler)
+target_link_libraries(test_freqscale_render PRIVATE SpectralCore)
 set_target_properties(test_freqscale_render PROPERTIES
     CXX_VISIBILITY_PRESET "hidden"
     CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
@@ -430,12 +367,6 @@ add_test(NAME reassignment COMMAND test_reassignment)
 
 add_executable(test_reassignment_render
     tests/rendering/test_reassignment_render.cpp
-    src/core/spectral/spectral_dataset.cpp
-    src/core/rendering/spectrogram_renderer.cpp
-    src/core/rendering/gpu_spectrogram.cpp
-    src/core/rendering/d3d11_context.cpp
-    src/core/rendering/spectrum_renderer.cpp
-    src/core/rendering/png_encoder.cpp
 )
 target_include_directories(test_reassignment_render PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
@@ -443,7 +374,7 @@ target_include_directories(test_reassignment_render PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/spectral>
 )
 target_compile_definitions(test_reassignment_render PRIVATE NOMINMAX)
-target_link_libraries(test_reassignment_render PRIVATE SpectralCore d3d11 d3dcompiler)
+target_link_libraries(test_reassignment_render PRIVATE SpectralCore)
 set_target_properties(test_reassignment_render PROPERTIES
     CXX_VISIBILITY_PRESET "hidden"
     CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
@@ -453,8 +384,6 @@ add_test(NAME reassignment_render COMMAND test_reassignment_render)
 # --- --- Phase 13: Multi-band STFT ---
 add_executable(test_multiband
     tests/spectral/test_multiband.cpp
-    src/core/spectral/multiband_analyzer.cpp
-    src/core/spectral/spectral_dataset.cpp
 )
 target_include_directories(test_multiband PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
@@ -469,8 +398,6 @@ add_test(NAME multiband COMMAND test_multiband)
 
 add_executable(test_multiband_compare
     tests/spectral/test_multiband_compare.cpp
-    src/core/spectral/multiband_analyzer.cpp
-    src/core/spectral/spectral_dataset.cpp
 )
 target_include_directories(test_multiband_compare PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
@@ -550,11 +477,6 @@ add_test(NAME phase16 COMMAND test_phase16)
 # --- --- Phase 17: GPU spectrogram rendering (D3D11 compute) ---
 add_executable(test_gpu_render
     tests/rendering/test_gpu_render.cpp
-    src/core/spectral/spectral_dataset.cpp
-    src/core/rendering/spectrogram_renderer.cpp
-    src/core/rendering/gpu_spectrogram.cpp
-    src/core/rendering/d3d11_context.cpp
-    src/core/rendering/png_encoder.cpp
 )
 target_include_directories(test_gpu_render PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
@@ -562,7 +484,7 @@ target_include_directories(test_gpu_render PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/rendering>
 )
 target_compile_definitions(test_gpu_render PRIVATE NOMINMAX)
-target_link_libraries(test_gpu_render PRIVATE SpectralCore d3d11 d3dcompiler)
+target_link_libraries(test_gpu_render PRIVATE SpectralCore)
 set_target_properties(test_gpu_render PROPERTIES
     CXX_VISIBILITY_PRESET "hidden"
     CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
@@ -573,18 +495,6 @@ add_test(NAME gpu_render COMMAND test_gpu_render)
 # --- --- Phase 19: batch processing + integration tests ---
 add_executable(test_batch
     tests/cli/test_batch.cpp
-    src/core/batch/batch.cpp
-    src/core/pipeline/pipeline.cpp
-    src/core/media/media_decoder.cpp
-    src/core/spectral/spectral_dataset.cpp
-    src/core/spectral/multiband_analyzer.cpp
-    src/core/rendering/spectrogram_renderer.cpp
-    src/core/rendering/gpu_spectrogram.cpp
-    src/core/rendering/d3d11_context.cpp
-    src/core/rendering/spectrum_renderer.cpp
-    src/core/rendering/png_encoder.cpp
-    src/core/encoding/video_encoder.cpp
-    src/core/encoding/video_renderer.cpp
 )
 target_include_directories(test_batch PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
@@ -596,7 +506,7 @@ target_include_directories(test_batch PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/batch>
 )
 target_compile_definitions(test_batch PRIVATE NOMINMAX)
-target_link_libraries(test_batch PRIVATE SpectralCore d3d11 d3dcompiler)
+target_link_libraries(test_batch PRIVATE SpectralCore)
 set_target_properties(test_batch PROPERTIES
     CXX_VISIBILITY_PRESET "hidden"
     CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
@@ -607,19 +517,6 @@ add_test(NAME batch COMMAND test_batch)
 # --- --- Phase 20: production hardening tests ---
 add_executable(test_hardening
     tests/cli/test_hardening.cpp
-    src/core/batch/batch.cpp
-    src/core/pipeline/pipeline.cpp
-    src/core/media/media_decoder.cpp
-    src/core/spectral/spectral_dataset.cpp
-    src/core/spectral/multiband_analyzer.cpp
-    src/core/rendering/spectrogram_renderer.cpp
-    src/core/rendering/gpu_spectrogram.cpp
-    src/core/rendering/d3d11_context.cpp
-    src/core/rendering/spectrum_renderer.cpp
-    src/core/rendering/png_encoder.cpp
-    src/core/encoding/video_encoder.cpp
-    src/core/encoding/video_renderer.cpp
-    src/core/project/project_config.cpp
 )
 target_include_directories(test_hardening PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
@@ -632,7 +529,7 @@ target_include_directories(test_hardening PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/project>
 )
 target_compile_definitions(test_hardening PRIVATE NOMINMAX)
-target_link_libraries(test_hardening PRIVATE SpectralCore d3d11 d3dcompiler)
+target_link_libraries(test_hardening PRIVATE SpectralCore)
 set_target_properties(test_hardening PROPERTIES
     CXX_VISIBILITY_PRESET "hidden"
     CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
@@ -660,17 +557,6 @@ endif()
 # --- --- Phase 18: CLI/GUI equivalence (shared pipeline determinism) ---
 add_executable(test_equivalence
     tests/cli/test_equivalence.cpp
-    src/core/pipeline/pipeline.cpp
-    src/core/media/media_decoder.cpp
-    src/core/spectral/spectral_dataset.cpp
-    src/core/spectral/multiband_analyzer.cpp
-    src/core/rendering/spectrogram_renderer.cpp
-    src/core/rendering/gpu_spectrogram.cpp
-    src/core/rendering/d3d11_context.cpp
-    src/core/rendering/spectrum_renderer.cpp
-    src/core/rendering/png_encoder.cpp
-    src/core/encoding/video_encoder.cpp
-    src/core/encoding/video_renderer.cpp
 )
 target_include_directories(test_equivalence PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
@@ -681,7 +567,7 @@ target_include_directories(test_equivalence PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/pipeline>
 )
 target_compile_definitions(test_equivalence PRIVATE NOMINMAX)
-target_link_libraries(test_equivalence PRIVATE SpectralCore d3d11 d3dcompiler)
+target_link_libraries(test_equivalence PRIVATE SpectralCore)
 set_target_properties(test_equivalence PROPERTIES
     CXX_VISIBILITY_PRESET "hidden"
     CXX_RUNTIME_LIBRARY "MultiThreadedDLL"

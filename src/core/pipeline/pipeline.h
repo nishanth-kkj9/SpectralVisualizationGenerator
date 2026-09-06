@@ -3,6 +3,7 @@
 // Phase 18 — Shared generate pipeline used by CLI and Qt GUI.
 // Thin API: fill GenerateConfig, call run_job(). No Qt, no CLI parsing here.
 
+#include "error.h"
 #include "spectral_dataset.h"
 
 #include <atomic>
@@ -40,28 +41,21 @@ struct GenerateConfig {
     bool use_gpu = false;  // spectrogram render_gpu() with CPU fallback
 };
 
-enum class JobError {
-    Ok = 0,
-    FileNotFound,
-    DecodeError,
-    AnalysisError,
-    RenderError,
-    BadConfig,
-};
+// JobError lives in error.h (stable codes shared with Error envelope).
 
 // Full pipeline: decode -> analyze -> render image or video.
 // Returns Ok on success. Progress may be empty (no-op).
 // Cancel is polled between stages; a set flag aborts before render.
 // Outputs are written atomically (temp file + rename), so an
 // interrupted job never leaves a partial file at output_path.
-JobError run_job(const GenerateConfig& cfg, ProgressFn progress = {},
+Error run_job(const GenerateConfig& cfg, ProgressFn progress = {},
                  const std::atomic<bool>* cancel = nullptr);
 
 // Stages for callers needing mid-pipeline access (CLI multiband table).
 // analyze_dataset fills dataset + raw mono samples; render_dataset writes output.
-JobError analyze_dataset(const GenerateConfig& cfg, Spectral::SpectralDataset& dataset,
+Error analyze_dataset(const GenerateConfig& cfg, Spectral::SpectralDataset& dataset,
                          std::vector<float>& samples_out, ProgressFn progress = {});
-JobError render_dataset(const GenerateConfig& cfg, const Spectral::SpectralDataset& dataset);
+Error render_dataset(const GenerateConfig& cfg, const Spectral::SpectralDataset& dataset);
 
 // Validate config without running. Returns error string, empty if valid.
 std::string validate_config(const GenerateConfig& cfg);

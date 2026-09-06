@@ -1,6 +1,5 @@
 #pragma once
 
-#include "spectral_analyzer.h"
 #include <vector>
 #include <cstdint>
 #include <string>

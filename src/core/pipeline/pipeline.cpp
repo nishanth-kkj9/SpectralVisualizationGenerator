@@ -12,6 +12,7 @@
 #include <cmath>
 #include <complex>
 #include <filesystem>
+#include <string>
 
 namespace fs = std::filesystem;
 
@@ -55,17 +56,23 @@ static std::vector<float> make_window(const std::string& type, int n) {
     return window_hann(n);
 }
 
-JobError analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
+Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
                          std::vector<float>& samples_out, ProgressFn progress) {
     GenerateConfig cfg = cfg_in;
-    if (!validate_config(cfg).empty()) return JobError::BadConfig;
+    const std::string cfg_err = validate_config(cfg);
+    if (!cfg_err.empty())
+        return Error::make(Subsystem::Pipeline, JobError::BadConfig, "config: " + cfg_err);
     if (cfg.hop_size == 0) cfg.hop_size = cfg.fft_size / 2;
 
     report(progress, 0.0f, "decode");
     MediaDecoder decoder;
-    if (!decoder.open(cfg.input_path)) return JobError::FileNotFound;
+    if (!decoder.open(cfg.input_path))
+        return Error::make(Subsystem::Media, JobError::FileNotFound,
+                           "media: cannot open '" + cfg.input_path + "'");
     int sr = decoder.sample_rate();
-    if (sr <= 0) return JobError::DecodeError;
+    if (sr <= 0)
+        return Error::make(Subsystem::Media, JobError::DecodeError,
+                           "media: no valid sample rate from '" + cfg.input_path + "'");
 
     std::vector<float> audio;
     AudioFrame frame;
@@ -84,7 +91,9 @@ JobError analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
         }
     }
     decoder.close();
-    if (audio.empty()) return JobError::DecodeError;
+    if (audio.empty())
+        return Error::make(Subsystem::Media, JobError::DecodeError,
+                           "media: decoded 0 audio samples from '" + cfg.input_path + "'");
 
     // STFT
     report(progress, 0.1f, "analyze");
@@ -94,7 +103,9 @@ JobError analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
     const int num_bins = cfg.fft_size / 2 + 1;
     const int total = static_cast<int>(audio.size());
     const int n_frames = (total - cfg.fft_size) / cfg.hop_size + 1;
-    if (n_frames <= 0) return JobError::AnalysisError;
+    if (n_frames <= 0)
+        return Error::make(Subsystem::Dsp, JobError::AnalysisError,
+                           "dsp: input too short for fft_size=" + std::to_string(cfg.fft_size));
 
     int frame_idx = 0;
     for (int start = 0; start + cfg.fft_size <= total; start += cfg.hop_size) {
@@ -185,7 +196,7 @@ JobError analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
     am.sample_rate = sr;
     samples_out = audio;
 
-    return JobError::Ok;
+    return Error::success();
 }
 
 // ponytail: temp + rename so interrupted jobs never leave partial outputs.
@@ -211,9 +222,11 @@ static std::string tmp_for(const std::string& dst) {
     return tmp.string();
 }
 
-JobError render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& dataset) {
+Error render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& dataset) {
     GenerateConfig cfg = cfg_in;
-    if (!validate_config(cfg).empty()) return JobError::BadConfig;
+    const std::string render_cfg_err = validate_config(cfg);
+    if (!render_cfg_err.empty())
+        return Error::make(Subsystem::Pipeline, JobError::BadConfig, "config: " + render_cfg_err);
     if (cfg.hop_size == 0) cfg.hop_size = cfg.fft_size / 2;
     const float fmin = (cfg.min_freq > 0) ? cfg.min_freq : 20.0f;
     const std::string tmp = tmp_for(cfg.output_path);
@@ -232,7 +245,8 @@ JobError render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& dat
         vrcfg.window_seconds = cfg.window_seconds;
         VideoRenderer vrend(vrcfg);
         if (vrend.render(dataset, tmp) != VideoRenderError::Ok)
-            return JobError::RenderError;
+            return Error::make(Subsystem::Encode, JobError::RenderError,
+                               "encode: video render failed for '" + cfg.output_path + "'");
     } else if (cfg.visualization == "spectrogram") {
         SpectrogramConfig sc;
         sc.width = cfg.width;
@@ -249,12 +263,15 @@ JobError render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& dat
             // ponytail: GPU fills RGBAImage; same PNG writer as CPU path
             RGBAImage img;
             if (renderer.render_gpu(dataset, img) != RenderError::Ok)
-                return JobError::RenderError;
+                return Error::make(Subsystem::Render, JobError::RenderError,
+                                   "render: spectrogram (GPU) failed for '" + cfg.output_path + "'");
             if (!PNGEncoder::write_rgba(tmp, img.width, img.height, img.pixels.data()))
-                return JobError::RenderError;
+                return Error::make(Subsystem::Render, JobError::RenderError,
+                                   "render: PNG write failed for '" + tmp + "'");
         } else {
             if (renderer.render_to_png(dataset, tmp) != RenderError::Ok)
-                return JobError::RenderError;
+                return Error::make(Subsystem::Render, JobError::RenderError,
+                                   "render: spectrogram failed for '" + cfg.output_path + "'");
         }
     } else {
         SpectrumConfig sc;
@@ -269,34 +286,40 @@ JobError render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& dat
         sc.db_floor = -cfg.db_range;
         SpectrumRenderer renderer(sc);
         if (renderer.render_to_png(dataset, tmp) != SpectrumError::Ok)
-            return JobError::RenderError;
+            return Error::make(Subsystem::Render, JobError::RenderError,
+                               "render: spectrum failed for '" + cfg.output_path + "'");
     }
 
-    if (!commit_file(tmp, cfg.output_path)) return JobError::RenderError;
-    return JobError::Ok;
+    if (!commit_file(tmp, cfg.output_path))
+        return Error::make(Subsystem::Pipeline, JobError::RenderError,
+                           "pipeline: cannot commit output '" + cfg.output_path + "'");
+    return Error::success();
 }
 
 static bool cancelled(const std::atomic<bool>* c) { return c && c->load(); }
 
-JobError run_job(const GenerateConfig& cfg, ProgressFn progress,
+Error run_job(const GenerateConfig& cfg, ProgressFn progress,
                  const std::atomic<bool>* cancel) {
     try {
         SpectralDataset dataset;
         std::vector<float> samples;
-        JobError err = analyze_dataset(cfg, dataset, samples, progress);
-        if (err != JobError::Ok) return err;
-        if (cancelled(cancel)) return JobError::AnalysisError;
+        Error err = analyze_dataset(cfg, dataset, samples, progress);
+        if (!err.ok()) return err;
+        if (cancelled(cancel))
+            return Error::make(Subsystem::Pipeline, JobError::AnalysisError, "pipeline: cancelled");
         report(progress, 0.65f, "render");
         err = render_dataset(cfg, dataset);
         if (err != JobError::Ok) return err;
         report(progress, 1.0f, "done");
-        return JobError::Ok;
+        return Error::success();
     } catch (const std::bad_alloc&) {
-        return JobError::AnalysisError;  // very long/large files: fail clearly
-    } catch (const std::exception&) {
-        return JobError::AnalysisError;
+        // very long/large files: fail clearly
+        return Error::make(Subsystem::Pipeline, JobError::AnalysisError, "pipeline: out of memory");
+    } catch (const std::exception& ex) {
+        return Error::make(Subsystem::Pipeline, JobError::AnalysisError,
+                           std::string("pipeline: ") + ex.what());
     } catch (...) {
-        return JobError::AnalysisError;
+        return Error::make(Subsystem::Pipeline, JobError::AnalysisError, "pipeline: unknown failure");
     }
 }
 

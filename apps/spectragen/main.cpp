@@ -366,15 +366,16 @@ static int parse_args(int argc, char* argv[], CliConfig& cfg) {
 // ============================================================================
 // Main
 // ============================================================================
-static int to_exit_code(Spectral::JobError e) {
-    switch (e) {
-        case Spectral::JobError::Ok:           return ExitCode::OK;
-        case Spectral::JobError::FileNotFound: return ExitCode::FileNotFound;
-        case Spectral::JobError::DecodeError:  return ExitCode::DecodeError;
-        case Spectral::JobError::AnalysisError:return ExitCode::AnalysisError;
-        case Spectral::JobError::RenderError:  return ExitCode::RenderError;
-        default:                               return ExitCode::BadArgs;
+static int to_exit_code(const Spectral::Error& e) {
+    switch (e.code) {
+        case Spectral::JobError::Ok:            return ExitCode::OK;
+        case Spectral::JobError::FileNotFound:  return ExitCode::FileNotFound;
+        case Spectral::JobError::DecodeError:   return ExitCode::DecodeError;
+        case Spectral::JobError::AnalysisError: return ExitCode::AnalysisError;
+        case Spectral::JobError::RenderError:   return ExitCode::RenderError;
+        case Spectral::JobError::BadConfig:     return ExitCode::BadArgs;
     }
+    return ExitCode::BadArgs;
 }
 
 int main(int argc, char* argv[]) {
@@ -442,9 +443,12 @@ int main(int argc, char* argv[]) {
     if (cfg.multiband) {
         Spectral::SpectralDataset dataset;
         std::vector<float> samples;
-        Spectral::JobError err = Spectral::analyze_dataset(cfg, dataset, samples, progress);
+        Spectral::Error err = Spectral::analyze_dataset(cfg, dataset, samples, progress);
         std::cerr << "\n";
-        if (err != Spectral::JobError::Ok) return to_exit_code(err);
+        if (!err.ok()) {
+            std::cerr << "Error: " << err.message << "\n";
+            return to_exit_code(err);
+        }
 
         std::cerr << "Analyzed " << dataset.frame_count() << " frames, "
                   << cfg.fft_size << "-point FFT, "
@@ -482,17 +486,21 @@ int main(int argc, char* argv[]) {
                     multi.dataset.frequency_resolution(), multi.compute_ms);
         std::printf("\n");
 
-        rc = to_exit_code(Spectral::render_dataset(cfg, dataset));
-        if (rc != ExitCode::OK) return rc;
+        Spectral::Error rerr = Spectral::render_dataset(cfg, dataset);
+        rc = to_exit_code(rerr);
+        if (rc != ExitCode::OK) {
+            std::cerr << "Error: " << rerr.message << "\n";
+            return rc;
+        }
         std::cerr << "Wrote " << cfg.output_path << "\n";
         return ExitCode::OK;
     }
 
     SetConsoleCtrlHandler(ctrl_handler, TRUE);
-    Spectral::JobError err = Spectral::run_job(cfg, progress, &g_cancel);
+    Spectral::Error err = Spectral::run_job(cfg, progress, &g_cancel);
     std::cerr << "\n";
-    if (err != Spectral::JobError::Ok) {
-        std::cerr << "Error: job failed (code " << static_cast<int>(err) << ")\n";
+    if (!err.ok()) {
+        std::cerr << "Error: " << err.message << "\n";
         return to_exit_code(err);
     }
 

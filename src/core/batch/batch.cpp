@@ -137,15 +137,15 @@ std::vector<FileResult> run_batch(const GenerateConfig& template_cfg,
                         }
                         r.attempts = a;
                         auto t0 = std::chrono::steady_clock::now();
-                        JobError err = JobError::Ok;
+                        Error err = Error::success();
                         try {
                             err = run_job(cfg);
                         } catch (const std::exception& ex) {
-                            err = JobError::AnalysisError;
-                            r.error = ex.what();
+                            err = Error::make(Subsystem::Pipeline, JobError::AnalysisError,
+                                              std::string("pipeline: ") + ex.what());
                         } catch (...) {
-                            err = JobError::AnalysisError;
-                            r.error = "unknown exception";
+                            err = Error::make(Subsystem::Pipeline, JobError::AnalysisError,
+                                              "pipeline: unknown exception");
                         }
                         auto t1 = std::chrono::steady_clock::now();
                         r.elapsed_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -155,7 +155,7 @@ std::vector<FileResult> run_batch(const GenerateConfig& template_cfg,
                             break;
                         }
                         if (r.error.empty())
-                            r.error = "job failed (code " + std::to_string(static_cast<int>(err)) + ")";
+                            r.error = err.message;
                     }
                 }
                 results[i] = r;
