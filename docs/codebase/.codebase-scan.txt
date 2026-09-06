@@ -1,0 +1,229 @@
+
+=== DIRECTORY TREE (max depth 3, source files only) ===
+.github
+.github\workflows
+.gitignore
+AGENTS.md
+benchmarks
+CMakeLists.txt
+CMakePresets.json
+docs
+docs\architecture
+docs\architecture\ARCHITECTURE.md
+docs\codebase
+docs\codebase\.codebase-scan.txt
+docs\dsp
+docs\formats
+docs\testing
+LICENSE
+README.md
+scripts
+src
+src\benchmarks
+src\benchmarks\main.cpp
+src\cli
+src\cli\main.cpp
+src\core
+src\core\audio
+src\core\audio\audio_buffer.h
+src\core\dsp
+src\core\dsp\fft.h
+src\core\dsp\test_fft.cpp
+src\core\export
+src\core\export\exporter.h
+src\core\media
+src\core\media\main.cpp
+src\core\media\media_decoder.cpp
+src\core\media\media_decoder.h
+src\core\project
+src\core\project\project_config.cpp
+src\core\project\project_config.h
+src\core\project\test_project_config.cpp
+src\core\rendering
+src\core\rendering\png_encoder.cpp
+src\core\rendering\png_encoder.h
+src\core\rendering\spectral_renderer.h
+src\core\rendering\spectrogram_renderer.cpp
+src\core\rendering\spectrogram_renderer.h
+src\core\rendering\spectrum_renderer.cpp
+src\core\rendering\spectrum_renderer.h
+src\core\rendering\test_spectrogram_renderer.cpp
+src\core\rendering\test_spectrum_renderer.cpp
+src\core\spectral
+src\core\spectral\concrete_analyzer.cpp
+src\core\spectral\concrete_analyzer.h
+src\core\spectral\spectral_analyzer.h
+src\core\spectral\spectral_dataset.cpp
+src\core\spectral\spectral_dataset.h
+src\core\spectral\test_spectral_dataset.cpp
+src\gui
+tests
+tests\accuracy
+tests\accuracy\ACCURACY_METHODOLOGY.md
+tests\accuracy\accuracy_validator.py
+tests\integration
+tests\phase6
+tests\phase6\golden_heat_lin.png
+tests\phase6\golden_heat_log.png
+tests\phase6\golden_viridis_lin.png
+tests\phase6\golden_viridis_log.png
+tests\phase7
+tests\phase7\_render_to_png.png
+tests\phase7\_roundtrip.png
+tests\phase7\golden_lin_heat.png
+tests\phase7\golden_lin_viridis.png
+tests\phase7\golden_log_heat.png
+tests\phase7\golden_log_viridis.png
+tests\phase8
+tests\phase8\_det_a.png
+tests\phase8\_det_b.png
+tests\phase8\_round_trip.json
+tests\phase8\golden_spectrum_v1.png
+tests\regression
+tests\unit
+tmp_formats.txt
+vcpkg.json
+
+=== STACK DETECTION (manifest files) ===
+
+--- CMakeLists.txt ---
+cmake_minimum_required(VERSION 3.20)
+project(SpectralVisualizationGenerator VERSION 0.1.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE "Debug")
+endif()
+
+add_library(SpectralCore INTERFACE)
+target_include_directories(SpectralCore INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+    $<INSTALL_INTERFACE:include>
+)
+
+if(MSVC)
+  target_compile_options(SpectralCore INTERFACE /Wall)
+else()
+  target_compile_options(SpectralCore INTERFACE -Wall -Wextra -Wpedantic)
+endif()
+
+add_executable(spectragen
+    src/cli/main.cpp
+)
+target_link_libraries(spectragen PRIVATE SpectralCore)
+
+set_target_properties(spectragen PROPERTIES
+    CXX_VISIBILITY_PRESET "hidden"
+    CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
+    WIN32_EXECUTABLE OFF
+)
+
+set_target_properties(spectragen PROPERTIES
+    LINK_FLAGS "/SUBSYSTEM:CONSOLE"
+)
+
+enable_testing()
+
+add_test(NAME spectragen_basic
+    COMMAND spectragen
+)
+
+add_test(NAME spectralcore_existence
+    COMMAND ${CMAKE_COMMAND} -E echo "SpectralCore library exists"
+)
+
+add_executable(spectral_benchmarks
+    src/benchmarks/main.cpp
+)
+target_link_libraries(spectral_benchmarks PRIVATE SpectralCore)
+
+set_target_properties(spectral_benchmarks PROPERTIES
+    CXX_VISIBILITY_PRESET "hidden"
+    CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
+    WIN32_EXECUTABLE OFF
+)
+
+set_target_properties(spectral_benchmarks PROPERTIES
+    LINK_FLAGS "/SUBSYSTEM:CONSOLE"
+)
+
+if(DEFINED ENV{FFMPEG_BINARY})
+    set(_ffmpeg_binary ${ENV{FFMPEG_BINARY}})
+else()
+    set(_ffmpeg_binary "ffmpeg")
+endif()
+
+if(DEFINED ENV{FFPROBE_BINARY})
+    set(_ffprobe_binary ${ENV{FFPROBE_BINARY}})
+else()
+    set(_ffprobe_binary "ffprobe")
+endif()
+
+add_executable(media_probe
+    src/core/media/media_decoder.cpp
+    src/core/media/main.cpp
+)
+
+set_target_properties(media_probe PROPERTIES
+
+[TRUNCATED] Showing first 80 of 241 lines.
+
+=== ENTRY POINTS ===
+No common entry points found. Check 'main' or 'scripts.start' in manifest files above.
+
+=== LINTING AND FORMATTING CONFIG ===
+No linting or formatting config files found in project root.
+
+=== ENVIRONMENT VARIABLE TEMPLATES ===
+No .env.example or .env.template found. Identify required environment variables by searching the code and config for environment variable reads.
+
+=== TODO / FIXME / HACK (production code only, test dirs excluded) ===
+src\core\audio\audio_buffer.h:49: // TODO: proper resampling
+
+=== GIT RECENT COMMITS (last 20) ===
+05f321b Initial commit: add README and gitignore
+
+=== HIGH-CHURN FILES (last 90 days, top 20) ===
+   1 .gitignore
+   1 README.md
+
+=== MONOREPO SIGNALS ===
+No monorepo signals detected.
+
+=== CODE METRICS ===
+Total files scanned: 51
+Total lines of code: 8099
+
+Files by language:
+  Other: 23
+  C++: 15
+  C Header: 12
+  Python: 1
+
+Top 10 largest files:
+tests\phase7\golden_lin_heat.png: 1250.5KB
+tests\phase7\golden_lin_viridis.png: 1250.5KB
+tests\phase7\golden_log_heat.png: 1250.5KB
+tests\phase7\golden_log_viridis.png: 1250.5KB
+tests\phase8\golden_spectrum_v1.png: 1250.5KB
+tests\phase8\_det_a.png: 1250.5KB
+tests\phase8\_det_b.png: 1250.5KB
+tests\phase6\golden_heat_lin.png: 128.2KB
+tests\phase6\golden_heat_log.png: 128.2KB
+tests\phase6\golden_viridis_lin.png: 128.2KB
+
+=== CI/CD PIPELINES ===
+No CI/CD pipelines detected.
+
+=== CONTAINERS & ORCHESTRATION ===
+No containerization configs detected.
+
+=== SECURITY & COMPLIANCE ===
+No security configs detected.
+
+=== PERFORMANCE & TESTING ===
+No performance testing configs detected.
+
+=== SCAN COMPLETE ===
