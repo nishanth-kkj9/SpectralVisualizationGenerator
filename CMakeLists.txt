@@ -23,6 +23,7 @@ endif()
 add_executable(spectragen
     src/cli/main.cpp
     src/core/pipeline/pipeline.cpp
+    src/core/batch/batch.cpp
     src/core/media/media_decoder.cpp
     src/core/spectral/spectral_dataset.cpp
     src/core/spectral/multiband_analyzer.cpp
@@ -41,6 +42,7 @@ target_include_directories(spectragen PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/spectral>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/encoding>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/pipeline>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/batch>
 )
 target_compile_definitions(spectragen PRIVATE NOMINMAX)
 target_link_libraries(spectragen PRIVATE SpectralCore d3d11 d3dcompiler)
@@ -567,6 +569,40 @@ set_target_properties(test_gpu_render PROPERTIES
     WIN32_EXECUTABLE OFF
 )
 add_test(NAME gpu_render COMMAND test_gpu_render)
+
+# --- --- Phase 19: batch processing + integration tests ---
+add_executable(test_batch
+    tests/phase19/test_batch.cpp
+    src/core/batch/batch.cpp
+    src/core/pipeline/pipeline.cpp
+    src/core/media/media_decoder.cpp
+    src/core/spectral/spectral_dataset.cpp
+    src/core/spectral/multiband_analyzer.cpp
+    src/core/rendering/spectrogram_renderer.cpp
+    src/core/rendering/gpu_spectrogram.cpp
+    src/core/rendering/d3d11_context.cpp
+    src/core/rendering/spectrum_renderer.cpp
+    src/core/rendering/png_encoder.cpp
+    src/core/encoding/video_encoder.cpp
+    src/core/encoding/video_renderer.cpp
+)
+target_include_directories(test_batch PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/media>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/rendering>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/spectral>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/encoding>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/pipeline>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/batch>
+)
+target_compile_definitions(test_batch PRIVATE NOMINMAX)
+target_link_libraries(test_batch PRIVATE SpectralCore d3d11 d3dcompiler)
+set_target_properties(test_batch PROPERTIES
+    CXX_VISIBILITY_PRESET "hidden"
+    CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
+    WIN32_EXECUTABLE OFF
+)
+add_test(NAME batch COMMAND test_batch)
 
 # --- --- Phase 18: CLI/GUI equivalence (shared pipeline determinism) ---
 add_executable(test_equivalence

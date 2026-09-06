@@ -3,8 +3,23 @@
 // No GUI, no GPU, no duplicated DSP logic beyond STFT loop.
 
 #include "pipeline.h"
+#include "batch.h"
 #include "multiband_analyzer.h"
 #include "spectral_dataset.h"
+
+#include <atomic>
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+
+static std::atomic<bool> g_cancel{false};
+static BOOL WINAPI ctrl_handler(DWORD type) {
+    if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT) {
+        g_cancel.store(true);
+        return TRUE;
+    }
+    return FALSE;
+}
 
 #include <algorithm>
 #include <cmath>
@@ -41,6 +56,12 @@ struct CliConfig : public Spectral::GenerateConfig {
     bool show_help = false;
     bool show_version = false;
     bool multiband = false;
+    // Batch mode: spectragen batch <input> <output> [options]
+    bool batch_mode = false;
+    bool recursive = false;
+    int jobs = 0;
+    int retries = 1;
+    std::string exts;  // comma-separated, empty = known media exts
 };
 
 // ============================================================================
@@ -75,6 +96,14 @@ static void print_usage() {
         "  --reassigned                Use time-frequency reassignment for improved resolution\n"
         "  --multiband                 Compare fixed/short/long/multi-band STFT\n"
         "  --gpu                       Use GPU spectrogram rendering (CPU fallback)\n"
+        "\n"
+        "Batch:\n"
+        "  spectragen batch <input> --output <dir> [options]\n"
+        "  <input>                     File or folder (folders scanned for media)\n"
+        "  --recursive                 Scan folders recursively\n"
+        "  --jobs <n>                  Parallel jobs, 0 = auto (default: 0)\n"
+        "  --retries <n>               Extra attempts per file (default: 1)\n"
+        "  --ext <a,b,c>               Extension filter, e.g. wav,mp3 (default: all media)\n"
         "  -h, --help                  Show this help\n"
         "  -V, --version               Show version\n"
         "\n"
@@ -268,6 +297,31 @@ static int parse_args(int argc, char* argv[], CliConfig& cfg) {
             cfg.multiband = true;
             continue;
         }
+        if (arg == "--recursive") {
+            cfg.recursive = true;
+            continue;
+        }
+        if (arg == "--jobs") {
+            if (i + 1 >= argc) { std::cerr << "Error: " << arg << " requires a value\n"; return 1; }
+            cfg.jobs = std::atoi(argv[++i]);
+            if (cfg.jobs < 0) { std::cerr << "Error: --jobs must be >= 0 (0 = auto)\n"; return 1; }
+            continue;
+        }
+        if (arg == "--retries") {
+            if (i + 1 >= argc) { std::cerr << "Error: " << arg << " requires a value\n"; return 1; }
+            cfg.retries = std::atoi(argv[++i]);
+            if (cfg.retries < 0) { std::cerr << "Error: --retries must be >= 0\n"; return 1; }
+            continue;
+        }
+        if (arg == "--ext") {
+            if (i + 1 >= argc) { std::cerr << "Error: " << arg << " requires a value\n"; return 1; }
+            cfg.exts = argv[++i];
+            continue;
+        }
+        if (arg == "batch" && cfg.input_path.empty() && i == 1) {
+            cfg.batch_mode = true;
+            continue;
+        }
 
         // Positional: input file
         if (cfg.input_path.empty() && arg[0] != '-') {
@@ -290,10 +344,14 @@ static int parse_args(int argc, char* argv[], CliConfig& cfg) {
     }
 
     // Auto-detect output format from extension if not explicitly set
+    // ponytail: batch outputs are directories (no extension) — guard npos
     if (cfg.output_format == "image" && !cfg.output_path.empty()) {
-        auto ext = cfg.output_path.substr(cfg.output_path.find_last_of('.'));
-        if (ext == ".mp4" || ext == ".webm" || ext == ".mkv") {
-            cfg.output_format = "video";
+        auto dot = cfg.output_path.find_last_of('.');
+        if (dot != std::string::npos) {
+            auto ext = cfg.output_path.substr(dot);
+            if (ext == ".mp4" || ext == ".webm" || ext == ".mkv") {
+                cfg.output_format = "video";
+            }
         }
     }
 
@@ -330,6 +388,55 @@ int main(int argc, char* argv[]) {
     auto progress = [](float f, const char* stage) {
         std::cerr << "\r[" << stage << "] " << static_cast<int>(f * 100) << "%" << std::flush;
     };
+
+    // Batch mode: folders / multiple files, bounded parallelism, per-file results.
+    if (cfg.batch_mode) {
+        SetConsoleCtrlHandler(ctrl_handler, TRUE);
+        Spectral::BatchOptions bopts;
+        bopts.recursive = cfg.recursive;
+        bopts.jobs = cfg.jobs;
+        bopts.retries = cfg.retries;
+        if (!cfg.exts.empty()) {
+            std::string cur;
+            for (char c : cfg.exts + ",") {
+                if (c == ',') {
+                    if (!cur.empty()) bopts.extensions.push_back(cur);
+                    cur.clear();
+                } else if (c != ' ') {
+                    cur += c;
+                }
+            }
+        }
+        auto files = Spectral::collect_inputs(cfg.input_path, bopts);
+        if (files.empty()) {
+            std::cerr << "Error: no media files found in '" << cfg.input_path << "'\n";
+            return ExitCode::FileNotFound;
+        }
+        std::cerr << "Batch: " << files.size() << " file(s), "
+                  << (bopts.jobs <= 0 ? "auto" : std::to_string(bopts.jobs))
+                  << " jobs, " << bopts.retries << " retries\n";
+        auto results = Spectral::run_batch(
+            cfg, files, cfg.input_path, cfg.output_path, bopts, g_cancel,
+            [](int done, int total, const char* file) {
+                std::cerr << "\r[" << done << "/" << total << "] " << file << "   " << std::flush;
+            });
+        std::cerr << "\n";
+        int ok = 0, fail = 0;
+        for (const auto& r : results) {
+            if (r.ok) {
+                ++ok;
+                std::cout << "OK   " << r.input << " -> " << r.output
+                          << " (" << static_cast<int>(r.elapsed_ms) << "ms"
+                          << ", attempts=" << r.attempts << ")\n";
+            } else {
+                ++fail;
+                std::cout << "FAIL " << r.input << " : " << r.error
+                          << " (attempts=" << r.attempts << ")\n";
+            }
+        }
+        std::cout << "Batch done: " << ok << " ok, " << fail << " failed\n";
+        return fail ? ExitCode::RenderError : ExitCode::OK;
+    }
 
     // Multi-band comparison needs mid-pipeline access: analyze, print table, render.
     if (cfg.multiband) {
