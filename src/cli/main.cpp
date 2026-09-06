@@ -488,7 +488,8 @@ int main(int argc, char* argv[]) {
         return ExitCode::OK;
     }
 
-    Spectral::JobError err = Spectral::run_job(cfg, progress);
+    SetConsoleCtrlHandler(ctrl_handler, TRUE);
+    Spectral::JobError err = Spectral::run_job(cfg, progress, &g_cancel);
     std::cerr << "\n";
     if (err != Spectral::JobError::Ok) {
         std::cerr << "Error: job failed (code " << static_cast<int>(err) << ")\n";

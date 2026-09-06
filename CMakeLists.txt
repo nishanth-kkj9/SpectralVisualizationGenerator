@@ -604,6 +604,59 @@ set_target_properties(test_batch PROPERTIES
 )
 add_test(NAME batch COMMAND test_batch)
 
+# --- --- Phase 20: production hardening tests ---
+add_executable(test_hardening
+    tests/phase20/test_hardening.cpp
+    src/core/batch/batch.cpp
+    src/core/pipeline/pipeline.cpp
+    src/core/media/media_decoder.cpp
+    src/core/spectral/spectral_dataset.cpp
+    src/core/spectral/multiband_analyzer.cpp
+    src/core/rendering/spectrogram_renderer.cpp
+    src/core/rendering/gpu_spectrogram.cpp
+    src/core/rendering/d3d11_context.cpp
+    src/core/rendering/spectrum_renderer.cpp
+    src/core/rendering/png_encoder.cpp
+    src/core/encoding/video_encoder.cpp
+    src/core/encoding/video_renderer.cpp
+    src/core/project/project_config.cpp
+)
+target_include_directories(test_hardening PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/media>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/rendering>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/spectral>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/encoding>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/pipeline>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/batch>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/project>
+)
+target_compile_definitions(test_hardening PRIVATE NOMINMAX)
+target_link_libraries(test_hardening PRIVATE SpectralCore d3d11 d3dcompiler)
+set_target_properties(test_hardening PROPERTIES
+    CXX_VISIBILITY_PRESET "hidden"
+    CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
+    WIN32_EXECUTABLE OFF
+)
+add_test(NAME hardening COMMAND test_hardening)
+
+# --- --- Phase 20: MSVC AddressSanitizer smoke (fail-clearly under ASan) ---
+if(MSVC)
+    add_executable(test_fft_asan_msvc
+        src/core/dsp/test_fft.cpp
+    )
+    target_include_directories(test_fft_asan_msvc PRIVATE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
+    )
+    target_link_libraries(test_fft_asan_msvc PRIVATE SpectralCore)
+    target_compile_options(test_fft_asan_msvc PRIVATE /fsanitize=address /Zi)
+    target_link_options(test_fft_asan_msvc PRIVATE /fsanitize=address)
+    set_target_properties(test_fft_asan_msvc PROPERTIES
+        CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
+    )
+    add_test(NAME fft_asan_msvc COMMAND test_fft_asan_msvc)
+endif()
+
 # --- --- Phase 18: CLI/GUI equivalence (shared pipeline determinism) ---
 add_executable(test_equivalence
     tests/phase18/test_equivalence.cpp

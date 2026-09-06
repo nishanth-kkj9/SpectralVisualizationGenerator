@@ -5,6 +5,7 @@
 
 #include "spectral_dataset.h"
 
+#include <atomic>
 #include <functional>
 #include <string>
 #include <vector>
@@ -50,7 +51,11 @@ enum class JobError {
 
 // Full pipeline: decode -> analyze -> render image or video.
 // Returns Ok on success. Progress may be empty (no-op).
-JobError run_job(const GenerateConfig& cfg, ProgressFn progress = {});
+// Cancel is polled between stages; a set flag aborts before render.
+// Outputs are written atomically (temp file + rename), so an
+// interrupted job never leaves a partial file at output_path.
+JobError run_job(const GenerateConfig& cfg, ProgressFn progress = {},
+                 const std::atomic<bool>* cancel = nullptr);
 
 // Stages for callers needing mid-pipeline access (CLI multiband table).
 // analyze_dataset fills dataset + raw mono samples; render_dataset writes output.

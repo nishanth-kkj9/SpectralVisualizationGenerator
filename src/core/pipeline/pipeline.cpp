@@ -11,6 +11,9 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <filesystem>
+
+namespace fs = std::filesystem;
 
 namespace Spectral {
 
@@ -29,6 +32,8 @@ std::string validate_config(const GenerateConfig& cfg) {
     if (cfg.db_range <= 0) return "db-range must be > 0";
     if (cfg.output_format != "image" && cfg.output_format != "video")
         return "output-format must be image or video";
+    if (cfg.max_freq > 0.0f && cfg.min_freq >= cfg.max_freq)
+        return "min-frequency must be below max-frequency";
     if (cfg.fps <= 0 || cfg.fps > 120) return "fps must be 1..120";
     if (cfg.crf < 0 || cfg.crf > 51) return "crf must be 0..51";
     return "";
@@ -183,11 +188,35 @@ JobError analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
     return JobError::Ok;
 }
 
+// ponytail: temp + rename so interrupted jobs never leave partial outputs.
+// Overwrite = remove + rename (fs::rename fails on existing Windows targets).
+static bool commit_file(const std::string& tmp, const std::string& dst) {
+    std::error_code ec;
+    // ponytail: never touch an existing directory — fail clearly instead
+    if (fs::is_directory(dst, ec) && !ec) {
+        fs::remove(tmp, ec);
+        return false;
+    }
+    fs::remove(dst, ec);
+    fs::rename(tmp, dst, ec);
+    if (ec) fs::remove(tmp, ec);
+    return !ec;
+}
+
+// ponytail: keep the real extension — ffmpeg sniffs format from it
+static std::string tmp_for(const std::string& dst) {
+    fs::path p(dst);
+    fs::path tmp = p;
+    tmp.replace_filename(p.stem().string() + ".part" + p.extension().string());
+    return tmp.string();
+}
+
 JobError render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& dataset) {
     GenerateConfig cfg = cfg_in;
     if (!validate_config(cfg).empty()) return JobError::BadConfig;
     if (cfg.hop_size == 0) cfg.hop_size = cfg.fft_size / 2;
     const float fmin = (cfg.min_freq > 0) ? cfg.min_freq : 20.0f;
+    const std::string tmp = tmp_for(cfg.output_path);
     if (cfg.output_format == "video") {
         VideoRendererConfig vrcfg;
         vrcfg.width = cfg.width;
@@ -202,7 +231,7 @@ JobError render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& dat
         vrcfg.db_ceiling = 0.0f;
         vrcfg.window_seconds = cfg.window_seconds;
         VideoRenderer vrend(vrcfg);
-        if (vrend.render(dataset, cfg.output_path) != VideoRenderError::Ok)
+        if (vrend.render(dataset, tmp) != VideoRenderError::Ok)
             return JobError::RenderError;
     } else if (cfg.visualization == "spectrogram") {
         SpectrogramConfig sc;
@@ -221,11 +250,10 @@ JobError render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& dat
             RGBAImage img;
             if (renderer.render_gpu(dataset, img) != RenderError::Ok)
                 return JobError::RenderError;
-            if (!PNGEncoder::write_rgba(cfg.output_path, img.width, img.height,
-                                        img.pixels.data()))
+            if (!PNGEncoder::write_rgba(tmp, img.width, img.height, img.pixels.data()))
                 return JobError::RenderError;
         } else {
-            if (renderer.render_to_png(dataset, cfg.output_path) != RenderError::Ok)
+            if (renderer.render_to_png(dataset, tmp) != RenderError::Ok)
                 return JobError::RenderError;
         }
     } else {
@@ -240,23 +268,36 @@ JobError render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& dat
         sc.db_ceiling = 0.0f;
         sc.db_floor = -cfg.db_range;
         SpectrumRenderer renderer(sc);
-        if (renderer.render_to_png(dataset, cfg.output_path) != SpectrumError::Ok)
+        if (renderer.render_to_png(dataset, tmp) != SpectrumError::Ok)
             return JobError::RenderError;
     }
 
+    if (!commit_file(tmp, cfg.output_path)) return JobError::RenderError;
     return JobError::Ok;
 }
 
-JobError run_job(const GenerateConfig& cfg, ProgressFn progress) {
-    SpectralDataset dataset;
-    std::vector<float> samples;
-    JobError err = analyze_dataset(cfg, dataset, samples, progress);
-    if (err != JobError::Ok) return err;
-    report(progress, 0.65f, "render");
-    err = render_dataset(cfg, dataset);
-    if (err != JobError::Ok) return err;
-    report(progress, 1.0f, "done");
-    return JobError::Ok;
+static bool cancelled(const std::atomic<bool>* c) { return c && c->load(); }
+
+JobError run_job(const GenerateConfig& cfg, ProgressFn progress,
+                 const std::atomic<bool>* cancel) {
+    try {
+        SpectralDataset dataset;
+        std::vector<float> samples;
+        JobError err = analyze_dataset(cfg, dataset, samples, progress);
+        if (err != JobError::Ok) return err;
+        if (cancelled(cancel)) return JobError::AnalysisError;
+        report(progress, 0.65f, "render");
+        err = render_dataset(cfg, dataset);
+        if (err != JobError::Ok) return err;
+        report(progress, 1.0f, "done");
+        return JobError::Ok;
+    } catch (const std::bad_alloc&) {
+        return JobError::AnalysisError;  // very long/large files: fail clearly
+    } catch (const std::exception&) {
+        return JobError::AnalysisError;
+    } catch (...) {
+        return JobError::AnalysisError;
+    }
 }
 
 } // namespace Spectral
