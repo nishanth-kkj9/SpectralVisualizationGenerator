@@ -21,12 +21,15 @@ static BOOL WINAPI ctrl_handler(DWORD type) {
     return FALSE;
 }
 
+#include "strict_parse.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -80,7 +83,8 @@ static void print_usage() {
         "  --fft <size>                FFT size, power of 2 (default: 1024)\n"
         "  --hop <samples>             Hop size (default: fft/2)\n"
         "  --window <type>             hann | hamming | blackman | rectangular (default: hann)\n"
-        "  --overlap <ratio>           Overlap 0..1 (default: 0.5)\n"
+        "  --overlap <ratio>           Overlap 0..1, sets hop=round(fft*(1-overlap))\n"
+        "                              (must agree with --hop if both given; default: 0.5)\n"
         "  --min-frequency <hz>        Minimum frequency in Hz (default: 0)\n"
         "  --max-frequency <hz>        Maximum frequency in Hz (default: auto/nyquist)\n"
         "  --db-range <db>             Dynamic range in dB (default: 80)\n"
@@ -126,6 +130,11 @@ static void print_usage() {
 // Argument parsing
 // ============================================================================
 static int parse_args(int argc, char* argv[], CliConfig& cfg) {
+    // hop_size is authoritative; --overlap derives it (track explicit use
+    // so contradictory --hop/--overlap combinations fail instead of
+    // silently disagreeing).
+    bool hop_given = false;
+    bool overlap_given = false;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
 
@@ -154,8 +163,10 @@ static int parse_args(int argc, char* argv[], CliConfig& cfg) {
         }
         if (arg == "--fft") {
             if (i + 1 >= argc) { std::cerr << "Error: " << arg << " requires a value\n"; return 1; }
-            cfg.fft_size = std::atoi(argv[++i]);
-            if (cfg.fft_size <= 0 || (cfg.fft_size & (cfg.fft_size - 1)) != 0) {
+            auto r = CliParse::parse_int(argv[++i], 2, (std::numeric_limits<int>::max)(), "--fft");
+            if (!r.ok) { std::cerr << "Error: " << r.error << "\n"; return 1; }
+            cfg.fft_size = static_cast<int>(r.value);
+            if ((cfg.fft_size & (cfg.fft_size - 1)) != 0) {
                 std::cerr << "Error: --fft must be a positive power of 2\n";
                 return 1;
             }
@@ -163,8 +174,10 @@ static int parse_args(int argc, char* argv[], CliConfig& cfg) {
         }
         if (arg == "--hop") {
             if (i + 1 >= argc) { std::cerr << "Error: " << arg << " requires a value\n"; return 1; }
-            cfg.hop_size = std::atoi(argv[++i]);
-            if (cfg.hop_size <= 0) { std::cerr << "Error: --hop must be positive\n"; return 1; }
+            auto r = CliParse::parse_int(argv[++i], 1, (std::numeric_limits<int>::max)(), "--hop");
+            if (!r.ok) { std::cerr << "Error: " << r.error << "\n"; return 1; }
+            cfg.hop_size = static_cast<int>(r.value);
+            hop_given = true;
             continue;
         }
         if (arg == "--window") {
@@ -179,46 +192,46 @@ static int parse_args(int argc, char* argv[], CliConfig& cfg) {
         }
         if (arg == "--overlap") {
             if (i + 1 >= argc) { std::cerr << "Error: " << arg << " requires a value\n"; return 1; }
-            cfg.overlap = std::atof(argv[++i]);
-            if (cfg.overlap < 0.0f || cfg.overlap >= 1.0f) {
+            auto r = CliParse::parse_float(argv[++i], "--overlap");
+            if (!r.ok) { std::cerr << "Error: " << r.error << "\n"; return 1; }
+            if (r.value < 0.0 || r.value >= 1.0) {
                 std::cerr << "Error: --overlap must be in [0, 1)\n";
                 return 1;
             }
+            cfg.overlap = static_cast<float>(r.value);
+            overlap_given = true;
             continue;
         }
         if (arg == "--min-frequency") {
             if (i + 1 >= argc) { std::cerr << "Error: " << arg << " requires a value\n"; return 1; }
-            cfg.min_freq = std::atof(argv[++i]);
-            if (cfg.min_freq < 0) { std::cerr << "Error: --min-frequency must be >= 0\n"; return 1; }
+            auto r = CliParse::parse_float(argv[++i], "--min-frequency");
+            if (!r.ok) { std::cerr << "Error: " << r.error << "\n"; return 1; }
+            if (r.value < 0) { std::cerr << "Error: --min-frequency must be >= 0\n"; return 1; }
+            cfg.min_freq = static_cast<float>(r.value);
             continue;
         }
         if (arg == "--max-frequency") {
             if (i + 1 >= argc) { std::cerr << "Error: " << arg << " requires a value\n"; return 1; }
-            cfg.max_freq = std::atof(argv[++i]);
-            if (cfg.max_freq < 0) { std::cerr << "Error: --max-frequency must be >= 0\n"; return 1; }
+            auto r = CliParse::parse_float(argv[++i], "--max-frequency");
+            if (!r.ok) { std::cerr << "Error: " << r.error << "\n"; return 1; }
+            if (r.value < 0) { std::cerr << "Error: --max-frequency must be >= 0\n"; return 1; }
+            cfg.max_freq = static_cast<float>(r.value);
             continue;
         }
         if (arg == "--db-range") {
             if (i + 1 >= argc) { std::cerr << "Error: " << arg << " requires a value\n"; return 1; }
-            cfg.db_range = std::atof(argv[++i]);
-            if (cfg.db_range <= 0) { std::cerr << "Error: --db-range must be > 0\n"; return 1; }
+            auto r = CliParse::parse_float(argv[++i], "--db-range");
+            if (!r.ok) { std::cerr << "Error: " << r.error << "\n"; return 1; }
+            if (r.value <= 0) { std::cerr << "Error: --db-range must be > 0\n"; return 1; }
+            cfg.db_range = static_cast<float>(r.value);
             continue;
         }
         if (arg == "--resolution") {
             if (i + 1 >= argc) { std::cerr << "Error: " << arg << " requires a value\n"; return 1; }
-            std::string res = argv[++i];
-            size_t xPos = res.find('x');
-            if (xPos == std::string::npos) xPos = res.find('X');
-            if (xPos == std::string::npos) {
-                std::cerr << "Error: --resolution must be WxH (e.g. 1024x512)\n";
-                return 1;
-            }
-            cfg.width = std::atoi(res.substr(0, xPos).c_str());
-            cfg.height = std::atoi(res.substr(xPos + 1).c_str());
-            if (cfg.width <= 0 || cfg.height <= 0) {
-                std::cerr << "Error: --resolution dimensions must be positive\n";
-                return 1;
-            }
+            auto r = CliParse::parse_resolution(argv[++i]);
+            if (!r.ok) { std::cerr << "Error: " << r.error << "\n"; return 1; }
+            cfg.width = r.width;
+            cfg.height = r.height;
             continue;
         }
         if (arg == "--output-format") {
@@ -232,11 +245,9 @@ static int parse_args(int argc, char* argv[], CliConfig& cfg) {
         }
         if (arg == "--fps") {
             if (i + 1 >= argc) { std::cerr << "Error: " << arg << " requires a value\n"; return 1; }
-            cfg.fps = std::atoi(argv[++i]);
-            if (cfg.fps <= 0 || cfg.fps > 120) {
-                std::cerr << "Error: --fps must be 1..120\n";
-                return 1;
-            }
+            auto r = CliParse::parse_int(argv[++i], 1, 120, "--fps");
+            if (!r.ok) { std::cerr << "Error: " << r.error << "\n"; return 1; }
+            cfg.fps = static_cast<int>(r.value);
             continue;
         }
         if (arg == "--codec") {
@@ -246,16 +257,16 @@ static int parse_args(int argc, char* argv[], CliConfig& cfg) {
         }
         if (arg == "--crf") {
             if (i + 1 >= argc) { std::cerr << "Error: " << arg << " requires a value\n"; return 1; }
-            cfg.crf = std::atoi(argv[++i]);
-            if (cfg.crf < 0 || cfg.crf > 51) {
-                std::cerr << "Error: --crf must be 0..51\n";
-                return 1;
-            }
+            auto r = CliParse::parse_int(argv[++i], 0, 51, "--crf");
+            if (!r.ok) { std::cerr << "Error: " << r.error << "\n"; return 1; }
+            cfg.crf = static_cast<int>(r.value);
             continue;
         }
         if (arg == "--duration") {
             if (i + 1 >= argc) { std::cerr << "Error: " << arg << " requires a value\n"; return 1; }
-            cfg.window_seconds = static_cast<float>(std::atof(argv[++i]));
+            auto r = CliParse::parse_float(argv[++i], "--duration");
+            if (!r.ok) { std::cerr << "Error: " << r.error << "\n"; return 1; }
+            cfg.window_seconds = static_cast<float>(r.value);
             if (cfg.window_seconds <= 0.0f) {
                 std::cerr << "Error: --duration must be > 0\n";
                 return 1;
@@ -275,14 +286,18 @@ static int parse_args(int argc, char* argv[], CliConfig& cfg) {
         }
         if (arg == "--cqt-center") {
             if (i + 1 >= argc) { std::cerr << "Error: " << arg << " requires a value\n"; return 1; }
-            cfg.cqt_center = static_cast<float>(std::atof(argv[++i]));
-            if (cfg.cqt_center <= 0.0f) { std::cerr << "Error: --cqt-center must be > 0\n"; return 1; }
+            auto r = CliParse::parse_float(argv[++i], "--cqt-center");
+            if (!r.ok) { std::cerr << "Error: " << r.error << "\n"; return 1; }
+            if (r.value <= 0.0) { std::cerr << "Error: --cqt-center must be > 0\n"; return 1; }
+            cfg.cqt_center = static_cast<float>(r.value);
             continue;
         }
         if (arg == "--cqt-q") {
             if (i + 1 >= argc) { std::cerr << "Error: " << arg << " requires a value\n"; return 1; }
-            cfg.cqt_q = static_cast<float>(std::atof(argv[++i]));
-            if (cfg.cqt_q <= 0.0f) { std::cerr << "Error: --cqt-q must be > 0\n"; return 1; }
+            auto r = CliParse::parse_float(argv[++i], "--cqt-q");
+            if (!r.ok) { std::cerr << "Error: " << r.error << "\n"; return 1; }
+            if (r.value <= 0.0) { std::cerr << "Error: --cqt-q must be > 0\n"; return 1; }
+            cfg.cqt_q = static_cast<float>(r.value);
             continue;
         }
         if (arg == "--reassigned") {
@@ -303,14 +318,16 @@ static int parse_args(int argc, char* argv[], CliConfig& cfg) {
         }
         if (arg == "--jobs") {
             if (i + 1 >= argc) { std::cerr << "Error: " << arg << " requires a value\n"; return 1; }
-            cfg.jobs = std::atoi(argv[++i]);
-            if (cfg.jobs < 0) { std::cerr << "Error: --jobs must be >= 0 (0 = auto)\n"; return 1; }
+            auto r = CliParse::parse_int(argv[++i], 0, 1024, "--jobs");
+            if (!r.ok) { std::cerr << "Error: " << r.error << "\n"; return 1; }
+            cfg.jobs = static_cast<int>(r.value);
             continue;
         }
         if (arg == "--retries") {
             if (i + 1 >= argc) { std::cerr << "Error: " << arg << " requires a value\n"; return 1; }
-            cfg.retries = std::atoi(argv[++i]);
-            if (cfg.retries < 0) { std::cerr << "Error: --retries must be >= 0\n"; return 1; }
+            auto r = CliParse::parse_int(argv[++i], 0, 100, "--retries");
+            if (!r.ok) { std::cerr << "Error: " << r.error << "\n"; return 1; }
+            cfg.retries = static_cast<int>(r.value);
             continue;
         }
         if (arg == "--ext") {
@@ -355,8 +372,30 @@ static int parse_args(int argc, char* argv[], CliConfig& cfg) {
         }
     }
 
-    // Defaults
-    if (cfg.hop_size == 0) {
+    // Resolve hop/overlap: hop_size is authoritative. An explicit --overlap
+    // derives hop (hop = round(fft * (1 - overlap))); explicit --hop and
+    // --overlap together must agree instead of silently disagreeing.
+    if (hop_given && overlap_given) {
+        const long long expect =
+            std::llround(static_cast<double>(cfg.fft_size) *
+                         (1.0 - static_cast<double>(cfg.overlap)));
+        if (static_cast<long long>(cfg.hop_size) != expect) {
+            std::cerr << "Error: --hop " << cfg.hop_size
+                      << " contradicts --overlap " << cfg.overlap
+                      << " (expected hop " << expect << " for fft "
+                      << cfg.fft_size << ")\n";
+            return 1;
+        }
+    } else if (overlap_given) {
+        const long long h =
+            std::llround(static_cast<double>(cfg.fft_size) *
+                         (1.0 - static_cast<double>(cfg.overlap)));
+        if (h < 1 || h > cfg.fft_size) {
+            std::cerr << "Error: --overlap derives an invalid hop size\n";
+            return 1;
+        }
+        cfg.hop_size = static_cast<int>(h);
+    } else if (cfg.hop_size == 0) {
         cfg.hop_size = cfg.fft_size / 2;
     }
 

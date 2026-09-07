@@ -46,14 +46,55 @@ std::string validate_config(const GenerateConfig& cfg) {
         return "hop-size must be >= 0 (0 = fft-size / 2)";
     if (cfg.hop_size > cfg.fft_size)
         return "hop-size must be <= fft-size (gapped windows unsupported)";
+    // All user floats must be finite: NaN/inf from direct API use must
+    // fail here, never reach DSP, renderers, or file arithmetic.
+    auto finite = [](float v) { return std::isfinite(v); };
+    if (!finite(cfg.overlap) || cfg.overlap < 0.0f || cfg.overlap >= 1.0f)
+        return "overlap must be finite and in [0, 1)";
+    if (!finite(cfg.min_freq) || cfg.min_freq < 0.0f)
+        return "min-frequency must be finite and >= 0";
+    if (!finite(cfg.max_freq) || cfg.max_freq < 0.0f)
+        return "max-frequency must be finite and >= 0";
+    if (!finite(cfg.db_range) || cfg.db_range <= 0.0f)
+        return "db-range must be finite and > 0";
+    if (!finite(cfg.cqt_center) || cfg.cqt_center <= 0.0f)
+        return "cqt-center must be finite and > 0";
+    if (!finite(cfg.cqt_q) || cfg.cqt_q <= 0.0f)
+        return "cqt-q must be finite and > 0";
+    if (!finite(cfg.window_seconds) && cfg.output_format == "video")
+        return "duration must be finite";
     if (cfg.width <= 0 || cfg.height <= 0) return "resolution must be positive";
-    if (cfg.db_range <= 0) return "db-range must be > 0";
+    if (cfg.width > 32768 || cfg.height > 32768)
+        return "resolution dimensions must be <= 32768";
+    // Allocation guard: RGBAImage holds width*height*4 bytes and the PNG
+    // writer buffers a second copy; cap pixels so a typo cannot request
+    // multi-GB allocations (bad_alloc remains the backstop past this).
+    if (static_cast<long long>(cfg.width) * cfg.height > (1LL << 28))
+        return "resolution pixel count must be <= 268M (8192x32768)";
     if (cfg.output_format != "image" && cfg.output_format != "video")
         return "output-format must be image or video";
     if (cfg.max_freq > 0.0f && cfg.min_freq >= cfg.max_freq)
         return "min-frequency must be below max-frequency";
-    if (cfg.fps <= 0 || cfg.fps > 120) return "fps must be 1..120";
-    if (cfg.crf < 0 || cfg.crf > 51) return "crf must be 0..51";
+    if (cfg.freq_scale != "linear" && cfg.freq_scale != "log" &&
+        cfg.freq_scale != "mel" && cfg.freq_scale != "bark" &&
+        cfg.freq_scale != "erb" && cfg.freq_scale != "cqt")
+        return "freq-scale must be linear, log, mel, bark, erb, or cqt";
+    if (cfg.output_format == "video") {
+        // Same bounds the encoder enforces; checked here so API callers
+        // fail at validation instead of mid-encode.
+        if (cfg.fps <= 0 || cfg.fps > 120) return "fps must be 1..120";
+        if (cfg.crf < 0 || cfg.crf > 51) return "crf must be 0..51";
+        if (!finite(cfg.window_seconds) || cfg.window_seconds <= 0.0f)
+            return "duration must be finite and > 0";
+        if (cfg.video_codec.empty()) return "codec must be non-empty";
+    }
+    // Fail before doing work if the output path is an existing directory.
+    // std::filesystem handles spaces/Unicode; nothing is created or run.
+    {
+        std::error_code ec;
+        if (fs::is_directory(cfg.output_path, ec) && !ec)
+            return "output path is a directory, file required";
+    }
     return "";
 }
 

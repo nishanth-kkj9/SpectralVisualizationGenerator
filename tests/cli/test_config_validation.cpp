@@ -4,8 +4,10 @@
 // run_job rejection with no output file produced.
 #include "pipeline.h"
 
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <limits>
 #include <string>
 
 namespace fs = std::filesystem;
@@ -117,11 +119,84 @@ static void test_rejected_before_decode() {
     }
 }
 
+static void test_strict_floats_and_scales() {
+    std::printf("[strict_floats_and_scales]\n");
+    const float qnan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    // NaN / inf in any user float fails at validation, never in DSP.
+    for (float bad : {qnan, inf, -inf}) {
+        auto cfg = base_cfg();
+        cfg.min_freq = bad;
+        CHECK(!Spectral::validate_config(cfg).empty(), "non-finite min_freq rejected");
+    }
+    {
+        auto cfg = base_cfg();
+        cfg.db_range = qnan;
+        CHECK(!Spectral::validate_config(cfg).empty(), "NaN db_range rejected");
+    }
+    {
+        auto cfg = base_cfg();
+        cfg.overlap = 1.0f;
+        CHECK(!Spectral::validate_config(cfg).empty(), "overlap=1 rejected");
+    }
+    {
+        auto cfg = base_cfg();
+        cfg.overlap = -0.0f;  // -0.0 compares == 0: still in [0,1)
+        CHECK(Spectral::validate_config(cfg).empty(), "overlap=-0 accepted");
+    }
+    // Exactly six scales; anything else fails closed.
+    for (const char* s :
+         {"linear", "log", "mel", "bark", "erb", "cqt"}) {
+        auto cfg = base_cfg();
+        cfg.freq_scale = s;
+        CHECK(Spectral::validate_config(cfg).empty(), "known scale accepted");
+    }
+    {
+        auto cfg = base_cfg();
+        cfg.freq_scale = "MEL";
+        CHECK(!Spectral::validate_config(cfg).empty(), "uppercase scale rejected");
+    }
+    // fps/crf/duration/codec bind only to video output.
+    {
+        auto cfg = base_cfg();
+        cfg.output_format = "image";
+        cfg.fps = 0;
+        cfg.crf = 99;
+        CHECK(Spectral::validate_config(cfg).empty(), "image ignores fps/crf");
+    }
+    {
+        auto cfg = base_cfg();
+        cfg.output_format = "video";
+        cfg.fps = 0;
+        CHECK(!Spectral::validate_config(cfg).empty(), "video fps=0 rejected");
+    }
+    {
+        auto cfg = base_cfg();
+        cfg.output_format = "video";
+        cfg.video_codec.clear();
+        CHECK(!Spectral::validate_config(cfg).empty(), "video empty codec rejected");
+    }
+    // Pixel-count cap: typo-scale resolutions fail before allocating.
+    {
+        auto cfg = base_cfg();
+        cfg.width = 32768;
+        cfg.height = 32768;
+        CHECK(!Spectral::validate_config(cfg).empty(), "32768x32768 rejected");
+    }
+    {
+        auto cfg = base_cfg();
+        cfg.width = 8192;
+        cfg.height = 32768;
+        CHECK(Spectral::validate_config(cfg).empty(), "8192x32768 at cap accepted");
+    }
+}
+
 int main() {
     test_valid_windows();
     test_invalid_windows();
     test_hop_contract();
     test_rejected_before_decode();
+    test_strict_floats_and_scales();
     std::printf("\n=== config_validation: %d/%d passed ===\n", g_pass, g_run);
     return (g_pass == g_run) ? 0 : 1;
 }
