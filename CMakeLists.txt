@@ -583,6 +583,17 @@ set_target_properties(test_hardening PROPERTIES
 )
 add_test(NAME hardening COMMAND test_hardening)
 
+add_executable(test_error_classification
+    tests/cli/test_error_classification.cpp
+)
+target_link_libraries(test_error_classification PRIVATE SpectralCore)
+set_target_properties(test_error_classification PROPERTIES
+    CXX_VISIBILITY_PRESET "hidden"
+    CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
+    WIN32_EXECUTABLE OFF
+)
+add_test(NAME error_classification COMMAND test_error_classification)
+
 # --- --- Phase 20: MSVC AddressSanitizer smoke (fail-clearly under ASan) ---
 if(MSVC)
     add_executable(test_fft_asan_msvc

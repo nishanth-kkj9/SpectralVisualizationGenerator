@@ -50,10 +50,19 @@ public:
 
     bool is_open() const;
 
+    // True when the last open() failed because ffmpeg could not start.
+    // Lets callers report DependencyMissing instead of generic EncodeError.
+    bool tool_missing() const { return tool_missing_; }
+
+    // Probe whether ffmpeg starts at all (spawns `ffmpeg -version`).
+    // Used on failure paths only to classify DependencyMissing.
+    static bool ffmpeg_available();
+
 private:
     SafeProcess proc_;
     VideoEncoderConfig cfg_;
     int64_t frames_written_ = 0;
+    bool tool_missing_ = false;
 };
 
 } // namespace Spectral

@@ -366,14 +366,21 @@ static int parse_args(int argc, char* argv[], CliConfig& cfg) {
 // ============================================================================
 // Main
 // ============================================================================
+// CLI exit contract (stable): internal codes stay precise, but several
+// map onto the pre-existing numeric exits. DependencyMissing is the one
+// addition that already had a reserved exit (6) with no producer.
 static int to_exit_code(const Spectral::Error& e) {
     switch (e.code) {
-        case Spectral::JobError::Ok:            return ExitCode::OK;
-        case Spectral::JobError::FileNotFound:  return ExitCode::FileNotFound;
-        case Spectral::JobError::DecodeError:   return ExitCode::DecodeError;
-        case Spectral::JobError::AnalysisError: return ExitCode::AnalysisError;
-        case Spectral::JobError::RenderError:   return ExitCode::RenderError;
-        case Spectral::JobError::BadConfig:     return ExitCode::BadArgs;
+        case Spectral::JobError::Ok:                return ExitCode::OK;
+        case Spectral::JobError::FileNotFound:      return ExitCode::FileNotFound;
+        case Spectral::JobError::DecodeError:       return ExitCode::DecodeError;
+        case Spectral::JobError::ProbeFailed:       return ExitCode::DecodeError;
+        case Spectral::JobError::NoAudioStream:     return ExitCode::DecodeError;
+        case Spectral::JobError::AnalysisError:     return ExitCode::AnalysisError;
+        case Spectral::JobError::RenderError:       return ExitCode::RenderError;
+        case Spectral::JobError::EncodeError:       return ExitCode::RenderError;
+        case Spectral::JobError::BadConfig:         return ExitCode::BadArgs;
+        case Spectral::JobError::DependencyMissing: return ExitCode::DependencyError;
     }
     return ExitCode::BadArgs;
 }

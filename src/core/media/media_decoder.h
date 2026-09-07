@@ -24,6 +24,18 @@ struct AudioFrame {
     double timestamp = 0.0;  // chunk start, seconds (stream time base)
 };
 
+// Why open() failed. Bool open() stays source-compatible; inspect this
+// for the precise cause instead of guessing from the message text.
+// Phase 2: the pipeline maps each value to a distinct JobError.
+enum class OpenStatus {
+    Ok = 0,
+    MissingInput,      // path does not exist / is not a regular file
+    ToolMissing,       // ffprobe/ffmpeg executable could not start
+    ProbeFailed,       // ffprobe ran but the file is unreadable
+    NoAudioStream,     // valid probe, no usable audio stream
+    DecoderStartFailed,  // ffmpeg executable could not start for decode
+};
+
 class MediaDecoder {
 public:
     struct DecodeOptions {
@@ -33,8 +45,10 @@ public:
 
     virtual ~MediaDecoder() = default;
 
-    // Probe + select audio stream + spawn decoder. False = usable last_error().
+    // Probe + select audio stream + spawn decoder. False = usable last_error()
+    // plus a machine-readable open_status().
     bool open(const std::string& filepath, const DecodeOptions& opts = DecodeOptions{});
+    OpenStatus open_status() const { return open_status_; }
 
     void close();
 
@@ -73,6 +87,7 @@ private:
 
     std::string filepath_;
     DecodeOptions opts_;
+    OpenStatus open_status_ = OpenStatus::Ok;
     bool format_open_ = false;
     int audio_stream_idx_ = -1;
     std::string codec_;

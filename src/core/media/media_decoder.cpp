@@ -3,6 +3,7 @@
 #include "process/safe_process.h"
 
 #include <cmath>
+#include <filesystem>
 #include <sstream>
 
 // S3 — streaming decode. ffmpeg stdout (s16le PCM pipe) is parsed in
@@ -102,10 +103,19 @@ bool run_capture(Spectral::SafeProcess& proc, const std::string& exe,
 
 bool MediaDecoder::open(const std::string& filepath, const DecodeOptions& opts) {
     close();
+    open_status_ = OpenStatus::Ok;
     filepath_ = filepath;
     opts_ = opts;
     if (opts_.chunk_frames == 0) opts_.chunk_frames = 4096;
-    if (!probe(filepath)) return false;
+    // Existence first: a missing path is MissingInput even if the tools
+    // are also absent. No subprocess is launched for a missing file.
+    std::error_code fec;
+    if (!std::filesystem::is_regular_file(filepath, fec) || fec) {
+        open_status_ = OpenStatus::MissingInput;
+        last_error_ = "media: input not found '" + filepath + "'";
+        return false;
+    }
+    if (!probe(filepath)) return false;  // status set inside probe()
 
     ffmpeg_path_ = Spectral::resolve_tool("ffmpeg");
     const int out_rate = opts_.target_rate > 0 ? opts_.target_rate : sample_rate_;
@@ -125,8 +135,14 @@ bool MediaDecoder::open(const std::string& filepath, const DecodeOptions& opts) 
     popts.capture_stdout = true;
     popts.capture_stderr = true;
     if (!proc_.spawn(ffmpeg_path_, argv, popts)) {
-        last_error_ = "media: cannot start decoder (" + proc_.last_error() + ")";
+        // Argv here is fixed and valid; spawn failure means the ffmpeg
+        // executable itself could not start. close() resets diagnostics,
+        // so preserve both across it.
+        const std::string why =
+            "media: cannot start decoder (" + proc_.last_error() + ")";
         close();
+        open_status_ = OpenStatus::DecoderStartFailed;
+        last_error_ = why;
         return false;
     }
     effective_rate_ = out_rate;
@@ -144,14 +160,18 @@ bool MediaDecoder::probe(const std::string& filepath) {
     };
     std::string out;
     if (!run_capture(proc, ffprobe_path_, argv, out)) {
-        if (out.empty())
-            last_error_ = "media: ffprobe failed for '" + filepath + "' (" +
-                          proc.last_error() + "; stderr: " + proc.stderr_text() + ")";
-        else
+        // Spawn never ran (exit code untouched at -1) => the ffprobe
+        // executable itself is missing. Otherwise ffprobe ran and the
+        // file is unreadable.
+        if (out.empty() && proc.exit_code() == -1) {
+            open_status_ = OpenStatus::ToolMissing;
+            last_error_ = "media: cannot start ffprobe (" +
+                          proc.last_error() + ")";
+        } else {
+            open_status_ = OpenStatus::ProbeFailed;
             last_error_ = "media: ffprobe exited nonzero for '" + filepath +
                           "'; stderr: " + proc.stderr_text();
-        // Distinguish "tool missing" from "bad file": empty output + spawn
-        // failure means the tool never ran.
+        }
         return false;
     }
     // Deterministic policy: lowest-index audio stream wins. Documented in
@@ -169,6 +189,7 @@ bool MediaDecoder::probe(const std::string& filepath) {
         }
     }
     if (!found) {
+        open_status_ = OpenStatus::NoAudioStream;
         last_error_ = "media: no audio stream in '" + filepath + "'";
         return false;
     }
@@ -213,6 +234,7 @@ bool MediaDecoder::probe(const std::string& filepath) {
 
 void MediaDecoder::close() {
     proc_.kill();
+    open_status_ = OpenStatus::Ok;
     filepath_.clear();
     format_open_ = false;
     audio_stream_idx_ = -1;

@@ -143,9 +143,25 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
     report(progress, 0.0f, "decode");
     MediaDecoder decoder;
     if (!decoder.open(cfg.input_path)) {
+        // Truthful classification: the decoder reports WHY open() failed
+        // via open_status() instead of collapsing everything into
+        // FileNotFound. Message always carries the decoder diagnostic.
         std::string why = decoder.last_error();
         if (why.empty()) why = "media: cannot open '" + cfg.input_path + "'";
-        return Error::make(Subsystem::Media, JobError::FileNotFound, why);
+        switch (decoder.open_status()) {
+            case OpenStatus::MissingInput:
+                return Error::make(Subsystem::Media, JobError::FileNotFound, why);
+            case OpenStatus::ToolMissing:
+            case OpenStatus::DecoderStartFailed:
+                return Error::make(Subsystem::Media, JobError::DependencyMissing, why);
+            case OpenStatus::ProbeFailed:
+                return Error::make(Subsystem::Media, JobError::ProbeFailed, why);
+            case OpenStatus::NoAudioStream:
+                return Error::make(Subsystem::Media, JobError::NoAudioStream, why);
+            case OpenStatus::Ok:
+                break;  // unreachable: open() failed; fall through below
+        }
+        return Error::make(Subsystem::Media, JobError::DecodeError, why);
     }
     int sr = decoder.sample_rate();
     if (sr <= 0)
@@ -417,9 +433,21 @@ Error render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& datase
         vrcfg.db_ceiling = 0.0f;
         vrcfg.window_seconds = cfg.window_seconds;
         VideoRenderer vrend(vrcfg);
-        if (vrend.render(dataset, tmp) != VideoRenderError::Ok)
-            return Error::make(Subsystem::Encode, JobError::RenderError,
-                               "encode: video render failed for '" + cfg.output_path + "'");
+        const VideoRenderError verr = vrend.render(dataset, tmp);
+        if (verr != VideoRenderError::Ok) {
+            // Encoder-open failure with no working ffmpeg is a dependency
+            // problem, not a render problem. ffmpeg_available() runs only
+            // on this failure path, never on success.
+            if (verr == VideoRenderError::EncoderOpenFailed &&
+                !VideoEncoder::ffmpeg_available())
+                return Error::make(Subsystem::Encode, JobError::DependencyMissing,
+                                   "encode: ffmpeg executable not found (PATH/FFMPEG_BINARY)");
+            if (verr == VideoRenderError::EmptyDataset)
+                return Error::make(Subsystem::Encode, JobError::RenderError,
+                                   "encode: no frames to encode for '" + cfg.output_path + "'");
+            return Error::make(Subsystem::Encode, JobError::EncodeError,
+                               "encode: video encode failed for '" + cfg.output_path + "'");
+        }
     } else if (cfg.visualization == "spectrogram") {
         SpectrogramConfig sc;
         ProjectConfigAdapter::to_spectrogram_config(rpc, sc);

@@ -40,9 +40,18 @@ bool VideoEncoder::is_open() const {
     return proc_.running();
 }
 
+bool VideoEncoder::ffmpeg_available() {
+    SafeProcess probe;
+    SafeProcess::Options opts;
+    opts.capture_stdout = true;
+    if (!probe.spawn(resolve_tool("ffmpeg"), {"-version"}, opts)) return false;
+    return probe.wait() == 0;
+}
+
 VideoEncoderError VideoEncoder::open(const std::string& output_path,
                                      const VideoEncoderConfig& cfg) {
     close();
+    tool_missing_ = false;
     if (output_path.empty() || cfg.width <= 0 || cfg.height <= 0) return VideoEncoderError::PipeFailure;
     if (cfg.fps <= 0 || cfg.fps > 120 || cfg.crf < 0 || cfg.crf > 51)
         return VideoEncoderError::PipeFailure;
@@ -65,7 +74,12 @@ VideoEncoderError VideoEncoder::open(const std::string& output_path,
     SafeProcess::Options opts;
     opts.provide_stdin = true;
     opts.capture_stderr = true;
-    if (!proc_.spawn(exe, argv, opts)) return VideoEncoderError::PipeFailure;
+    if (!proc_.spawn(exe, argv, opts)) {
+        // Argv is fixed and valid here; spawn failure means ffmpeg itself
+        // could not start.
+        tool_missing_ = true;
+        return VideoEncoderError::PipeFailure;
+    }
     return VideoEncoderError::Ok;
 }
 

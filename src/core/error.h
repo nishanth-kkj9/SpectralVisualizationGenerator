@@ -24,13 +24,19 @@ enum class Subsystem {
 };
 
 // Canonical pipeline result codes. Values are pinned — do not renumber.
+// Phase 2 added distinct media/dependency/encoder failures that used to
+// collapse into FileNotFound/DecodeError/RenderError.
 enum class JobError {
     Ok = 0,
-    FileNotFound,
-    DecodeError,
-    AnalysisError,
-    RenderError,
-    BadConfig,
+    FileNotFound = 1,     // input path does not exist / is not a file
+    DecodeError = 2,      // decoder ran but the stream failed mid-decode
+    AnalysisError = 3,    // DSP/analysis stage failure
+    RenderError = 4,      // image renderer failure
+    BadConfig = 5,        // invalid configuration (rejected pre-decode)
+    DependencyMissing = 6,  // ffmpeg/ffprobe executable could not start
+    ProbeFailed = 7,        // ffprobe ran but the file is unreadable
+    NoAudioStream = 8,      // valid media, no usable audio stream
+    EncodeError = 9,        // video encoder failure (distinct from render)
 };
 
 struct Error {
@@ -70,12 +76,16 @@ inline const char* subsystem_name(Subsystem s) noexcept {
 
 inline const char* job_error_name(JobError e) noexcept {
     switch (e) {
-        case JobError::Ok:            return "ok";
-        case JobError::FileNotFound:  return "file-not-found";
-        case JobError::DecodeError:   return "decode-error";
-        case JobError::AnalysisError: return "analysis-error";
-        case JobError::RenderError:   return "render-error";
-        case JobError::BadConfig:     return "bad-config";
+        case JobError::Ok:                return "ok";
+        case JobError::FileNotFound:      return "file-not-found";
+        case JobError::DecodeError:       return "decode-error";
+        case JobError::AnalysisError:     return "analysis-error";
+        case JobError::RenderError:       return "render-error";
+        case JobError::BadConfig:         return "bad-config";
+        case JobError::DependencyMissing: return "dependency-missing";
+        case JobError::ProbeFailed:       return "probe-failed";
+        case JobError::NoAudioStream:     return "no-audio-stream";
+        case JobError::EncodeError:       return "encode-error";
     }
     return "unknown";
 }

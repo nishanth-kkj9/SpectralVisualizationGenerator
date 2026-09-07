@@ -23,6 +23,26 @@ The resolved paths are exposed (`ffmpeg_path()`, `ffprobe_path()`) and
 printed by `media_probe`. A missing tool fails `open()` with a diagnostic
 naming the tool — never a silent fallback.
 
+## Failure taxonomy
+
+`MediaDecoder::open()` reports a machine-readable `OpenStatus` (not just
+bool); the pipeline maps each value to a distinct `JobError`:
+
+```text
+missing path          -> FileNotFound      (no subprocess launched)
+tool cannot start     -> DependencyMissing  (names ffmpeg/ffprobe)
+ffprobe ran, unreadable -> ProbeFailed
+valid probe, no audio -> NoAudioStream
+ffmpeg cannot start   -> DependencyMissing
+ffmpeg exits nonzero  -> DecodeError (failed(), stderr tail kept)
+```
+
+Video encoder failures map to `EncodeError` (missing ffmpeg still
+`DependencyMissing`); image renderer failures stay `RenderError`.
+The CLI keeps its numeric exits: 2/3/4/5 as before, new codes fold in
+(`ProbeFailed`/`NoAudioStream` -> 3, `EncodeError` -> 5) except
+`DependencyMissing`, which uses the long-reserved exit 6.
+
 ## Stream selection
 
 Probe output is parsed as order-independent `flat` key=value (no JSON
