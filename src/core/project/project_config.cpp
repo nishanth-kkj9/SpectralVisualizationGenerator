@@ -507,6 +507,11 @@ bool ProjectConfig::validate(std::vector<std::string>& errors) const {
     if (analysis.analysis_version == 0) {
         errors.push_back("analysis.analysis_version must be > 0");
     }
+    {
+        std::vector<std::string> rep_errs;
+        validate_representation(analysis.representation, analysis.fft_size, rep_errs);
+        for (const auto& e : rep_errs) errors.push_back("analysis.representation: " + e);
+    }
     if (analysis.analyzed_channels < 0 || analysis.channel_mapping < 0) {
         errors.push_back("analysis channel counts must be >= 0");
     }
@@ -594,6 +599,8 @@ namespace {
 // the JSON manually for each ProjectConfig substruct (the struct is small
 // and fields are well known).
 using KV = std::pair<std::string, std::string>;
+void emit_representation(const RepresentationInfo& r, std::vector<KV>& kvs);
+void emit_object(std::string& out, int indent, bool pretty, const std::vector<KV>& kvs);
 
 void emit_input(const ProjectInput& in, std::vector<KV>& kvs) {
     kvs.push_back({"codec_long_name",     json_escape(in.codec_long_name)});
@@ -610,6 +617,13 @@ void emit_analysis(const ProjectAnalysis& a, std::vector<KV>& kvs) {
     kvs.push_back({"analysis_version",    fmt_uint(a.analysis_version)});
     kvs.push_back({"analyzed_channels",   fmt_int(a.analyzed_channels)});
     kvs.push_back({"channel_mapping",     fmt_int(a.channel_mapping)});
+    {
+        std::vector<KV> rv;
+        emit_representation(a.representation, rv);
+        std::string inner;
+        emit_object(inner, 0, false, rv);
+        kvs.push_back({"representation", std::move(inner)});
+    }
     kvs.push_back({"fft_size",            fmt_int(a.fft_size)});
     kvs.push_back({"hop_size",            fmt_int(a.hop_size)});
     kvs.push_back({"magnitude_scale",     fmt_float(a.magnitude_scale)});
@@ -666,6 +680,22 @@ void emit_object(std::string& out, int indent, bool pretty,
     }
     if (pretty) { out.push_back('\n'); put_indent(out, indent); }
     out.push_back('}');
+}
+
+void emit_representation(const RepresentationInfo& r, std::vector<KV>& kvs) {
+    kvs.push_back({"bands",   fmt_int(r.bands)});
+    kvs.push_back({"bins",    fmt_int(r.bins)});
+    kvs.push_back({"fmax_hz", fmt_float(r.fmax_hz)});
+    kvs.push_back({"fmin_hz", fmt_float(r.fmin_hz)});
+    kvs.push_back({"kind",    json_escape(representation_kind_name(r.kind))});
+    kvs.push_back({"norm",    json_escape(representation_norm_name(r.norm))});
+    kvs.push_back({"phase",   json_escape(r.phase == RepresentationPhase::Available
+                                                ? "available"
+                                                : "n/a")});
+    kvs.push_back({"q",       fmt_float(r.q)});
+    kvs.push_back({"reassignment",
+                   r.reassignment_supported ? "true" : "false"});
+    kvs.push_back({"version", fmt_uint(r.version)});
 }
 
 } // namespace
@@ -819,6 +849,47 @@ bool ProjectConfigSerializer::from_json(const std::string& json, ProjectConfig& 
         }
         if (get("analysis.analysis_method", e))  out.analysis.analysis_method = expect_str(e, "analysis.analysis_method");
         if (get("analysis.analysis_version", e)) out.analysis.analysis_version = static_cast<uint32_t>(expect_u64(e));
+        // Nested representation object (absent in pre-S6.0 JSON: STFT default stands).
+        if (get("analysis.representation.kind", e)) {
+            RepresentationKind k;
+            if (!try_parse_representation_kind(expect_str(e, "analysis.representation.kind"), k)) {
+                error = "unknown analysis.representation.kind";
+                return false;
+            }
+            out.analysis.representation.kind = k;
+        }
+        if (get("analysis.representation.bins", e))
+            out.analysis.representation.bins = expect_i(e);
+        if (get("analysis.representation.fmin_hz", e))
+            out.analysis.representation.fmin_hz = expect_f(e);
+        if (get("analysis.representation.fmax_hz", e))
+            out.analysis.representation.fmax_hz = expect_f(e);
+        if (get("analysis.representation.bands", e))
+            out.analysis.representation.bands = expect_i(e);
+        if (get("analysis.representation.q", e))
+            out.analysis.representation.q = expect_f(e);
+        if (get("analysis.representation.norm", e)) {
+            RepresentationNorm n;
+            if (!try_parse_representation_norm(expect_str(e, "analysis.representation.norm"), n)) {
+                error = "unknown analysis.representation.norm";
+                return false;
+            }
+            out.analysis.representation.norm = n;
+        }
+        if (get("analysis.representation.phase", e)) {
+            const std::string ph = expect_str(e, "analysis.representation.phase");
+            if (ph != "available" && ph != "n/a") {
+                error = "unknown analysis.representation.phase";
+                return false;
+            }
+            out.analysis.representation.phase =
+                (ph == "available") ? RepresentationPhase::Available
+                                      : RepresentationPhase::NotApplicable;
+        }
+        if (get("analysis.representation.reassignment", e))
+            out.analysis.representation.reassignment_supported = expect_b(e);
+        if (get("analysis.representation.version", e))
+            out.analysis.representation.version = static_cast<uint32_t>(expect_u64(e));
     }
     // dynamic_range.*
     {

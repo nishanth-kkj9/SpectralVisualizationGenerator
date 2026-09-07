@@ -115,7 +115,16 @@ int main() {
     CHECK(d1.save_to_file(dir + "/s5.spdt"), "dataset saved");
     Spectral::SpectralDataset loaded;
     CHECK(loaded.load_from_file(dir + "/s5.spdt"), "dataset loaded");
-    CHECK(loaded == d1, "reload semantic equality");
+    // v3 binary carries everything except representation metadata (v4
+    // boundary, documented): compare with representation neutralized, and
+    // prove representation survives the JSON path instead (spectral suite).
+    {
+        Spectral::SpectralDataset a = d1;
+        Spectral::SpectralDataset b = loaded;
+        a.mutable_representation() = Spectral::RepresentationInfo();
+        b.mutable_representation() = Spectral::RepresentationInfo();
+        CHECK(a == b, "reload semantic equality sans representation");
+    }
     CHECK(loaded.dataset_identity() == d1.dataset_identity(), "identity survives reload");
     CHECK(Spectral::render_dataset(cfg, loaded).ok(), "render from loaded");
     std::vector<uint8_t> png_loaded, png_direct, png_again;

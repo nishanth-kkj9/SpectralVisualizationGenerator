@@ -7,6 +7,10 @@
 #include <optional>
 #include <array>
 
+// Representation model (S6.0 architecture): WHAT was computed, not how
+// it is displayed. See representation.h.
+#include "representation.h"
+
 namespace Spectral {
 
 // ============================================================================
@@ -16,6 +20,10 @@ namespace Spectral {
 // reassigned arrays serialized, strict version gate. v1/v2 blobs are
 // rejected — the layout contract changed. History: v1 initial, v2 added
 // method/band_count, v3 explicit LE + reassigned + strict gate.
+// S6.0 NOTE (v4 boundary): representation metadata (RepresentationInfo)
+// is intentionally NOT in the v3 binary yet. Non-STFT representations
+// change the meaning and shape of frequency data, so persisting them
+// needs a v4 layout; v4 is designed but not implemented in S6.0.
 constexpr uint32_t SPECTRAL_DATASET_VERSION = 3;
 constexpr uint32_t SPECTRAL_DATASET_MIN_COMPATIBLE_VERSION = 3;
 
@@ -224,6 +232,14 @@ struct ChannelInfo {
 
 // ============================================================================
 // Spectral frame (enhanced)
+// ----------------------------------------------------------------------------
+// Representation contract (S6.0): magnitudes are always defined per bin.
+// phases are meaningful only when the dataset representation marks phase
+// available — do not fabricate phase for representations that have none.
+// reassigned_times/freqs are meaningful only when the representation
+// supports reassignment AND the vectors are non-empty (conventional STFT
+// leaves them empty). Frame sizes follow the representation, not
+// unconditionally fft_size/2+1 (equal only for STFT).
 // ============================================================================
 struct SpectralFrame {
     int frame_index = 0;
@@ -341,6 +357,9 @@ public:
     const FrequencyAxis& frequency_axis() const { return freq_axis_; }
     const TimeAxis& time_axis() const { return time_axis_; }
     const ChannelInfo& channel_info() const { return channel_info_; }
+    // Representation contract: what the bins mean. STFT datasets mirror
+    // the FFT grid; see RepresentationInfo for non-STFT semantics.
+    const RepresentationInfo& representation() const { return representation_; }
     
     // Metadata
     const SourceMetadata& source_metadata() const { return source_meta_; }
@@ -354,6 +373,7 @@ public:
     FrequencyAxis& mutable_frequency_axis() { return freq_axis_; }
     TimeAxis& mutable_time_axis() { return time_axis_; }
     ChannelInfo& mutable_channel_info() { return channel_info_; }
+    RepresentationInfo& mutable_representation() { return representation_; }
     
     // ========================================================================
     // Computed properties
@@ -410,6 +430,10 @@ private:
     FrequencyAxis freq_axis_;
     TimeAxis time_axis_;
     ChannelInfo channel_info_;
+    // What the bins mean. STFT default mirrors the FFT grid; non-STFT
+    // kinds carry explicit counts/centers (never N/2+1). In-memory in v3
+    // (persisted in JSON; binary persistence waits for the v4 layout).
+    RepresentationInfo representation_;
     
     // Internal validation
     void validate_dimensions(ValidationResult& result) const;

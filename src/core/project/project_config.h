@@ -15,6 +15,9 @@
 #include <string>
 #include <vector>
 
+// Representation model: WHAT was computed (S6.0). See spectral/representation.h.
+#include "../spectral/representation.h"
+
 namespace Spectral {
 
 // ============================================================================
@@ -122,6 +125,11 @@ struct ProjectAnalysis {
     // 2 = amplitude-corrected one-sided STFT (S4+).
     std::string analysis_method = "stft";
     uint32_t analysis_version = 2;
+    // Spectral representation contract (S6.0): kind + parameters.
+    // STFT default leaves bins implied by fft_size. Non-STFT kinds
+    // require explicit bins (validated). Bin centers are computed data,
+    // not configuration, and are NOT persisted here.
+    RepresentationInfo representation;
 
     bool operator==(const ProjectAnalysis& o) const {
         return fft_size == o.fft_size &&
@@ -135,7 +143,8 @@ struct ProjectAnalysis {
                magnitude_scale == o.magnitude_scale &&
                phase_unwrap == o.phase_unwrap &&
                analysis_method == o.analysis_method &&
-               analysis_version == o.analysis_version;
+               analysis_version == o.analysis_version &&
+               representation == o.representation;
     }
 };
 

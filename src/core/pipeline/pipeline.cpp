@@ -118,6 +118,11 @@ ProjectConfig make_project_config(const GenerateConfig& cfg, const DecodedMedia&
     ProjectFreqScale sc = ProjectFreqScale::Logarithmic;
     try_parse_freq_scale(cfg.freq_scale, sc);  // unknown keeps Logarithmic, as before
     pc.frequency_range.scale = sc;
+    // Representation produced here is always conventional STFT today.
+    // Bins stay implied by fft_size; future Mel/CQT builders will set
+    // explicit counts through this same struct (never N/2+1 for them).
+    pc.analysis.representation = RepresentationInfo::stft_default();
+    pc.analysis.representation.reassignment_supported = cfg.reassigned;
     pc.renderer.kind = (cfg.visualization == "spectrogram") ? RendererKind::Spectrogram
                                                               : RendererKind::Spectrum;
     pc.renderer.width = cfg.width;
@@ -331,6 +336,15 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
             ci.channel_names.push_back(channel_name_for(ch));
     }
     {
+        // Dataset representation mirrors the canonical config, made
+        // explicit: STFT bins are the produced count, range the Nyquist
+        // span, phase available, reassignment per the request.
+        auto& rep = dataset.mutable_representation();
+        rep = pc.analysis.representation;
+        rep.bins = dataset.num_frequency_bins();
+        rep.fmin_hz = 0.0f;
+        rep.fmax_hz = dataset.nyquist_frequency();
+        rep.phase = RepresentationPhase::Available;
         auto& nm = dataset.mutable_normalization_info();
         nm.window_coherent_gain = pc.analysis.window_coherent_gain;
         nm.window_energy_gain = pc.dynamic_range.window_energy_gain;

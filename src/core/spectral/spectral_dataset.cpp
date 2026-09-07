@@ -265,33 +265,39 @@ void SpectralDataset::validate_dimensions(ValidationResult& r) const {
     if (time_axis_.frame_times.size() != frames_.size()) {
         r.add_error("time_axis.frame_times size mismatch");
     }
+    // Expected frame width follows the representation: FFT-grid bins for
+    // STFT, explicit representation bins otherwise (never N/2+1 there).
+    const int expect_bins = (!representation_.is_stft() && representation_.bins > 0)
+                                ? representation_.bins
+                                : nb;
     for (size_t i = 0; i < frames_.size(); ++i) {
         const auto& f = frames_[i];
-        if (static_cast<int>(f.magnitudes.size()) != nb) {
+        if (static_cast<int>(f.magnitudes.size()) != expect_bins) {
             r.add_error("frame[" + std::to_string(i) +
-                        "].magnitudes size != num_bins");
+                        "].magnitudes size != expected bins");
         }
-        if (static_cast<int>(f.phases.size()) != nb) {
+        if (static_cast<int>(f.phases.size()) != expect_bins) {
             r.add_error("frame[" + std::to_string(i) +
-                        "].phases size != num_bins");
+                        "].phases size != expected bins");
         }
-        if (static_cast<int>(f.power.size()) != nb) {
+        if (static_cast<int>(f.power.size()) != expect_bins) {
             r.add_error("frame[" + std::to_string(i) +
-                        "].power size != num_bins");
+                        "].power size != expected bins");
         }
         // Reassigned coordinates are either absent (conventional STFT)
         // or cover every bin.
         if (!f.reassigned_times.empty() &&
-            static_cast<int>(f.reassigned_times.size()) != nb) {
+            static_cast<int>(f.reassigned_times.size()) != expect_bins) {
             r.add_error("frame[" + std::to_string(i) +
-                        "].reassigned_times size != num_bins");
+                        "].reassigned_times size != expected bins");
         }
         if (!f.reassigned_freqs.empty() &&
-            static_cast<int>(f.reassigned_freqs.size()) != nb) {
+            static_cast<int>(f.reassigned_freqs.size()) != expect_bins) {
             r.add_error("frame[" + std::to_string(i) +
-                        "].reassigned_freqs size != num_bins");
+                        "].reassigned_freqs size != expected bins");
         }
-        if (f.n_fft != analysis_meta_.fft_size) {
+        // n_fft is an STFT concept; non-STFT frames carry no FFT size.
+        if (representation_.is_stft() && f.n_fft != analysis_meta_.fft_size) {
             r.add_error("frame[" + std::to_string(i) +
                         "].n_fft (" + std::to_string(f.n_fft) +
                         ") != analysis.fft_size (" +
@@ -335,6 +341,22 @@ void SpectralDataset::validate_dimensions(ValidationResult& r) const {
     }
     if (!std::isfinite(time_axis_.frame_duration) || !std::isfinite(time_axis_.total_duration)) {
         r.add_error("time_axis durations not finite");
+    }
+    // Representation coherence: WHAT the bins mean must agree with their shape.
+    {
+        std::vector<std::string> rep_errs;
+        validate_representation(representation_, analysis_meta_.fft_size, rep_errs);
+        for (const auto& e : rep_errs) r.add_error("representation: " + e);
+    }
+    // Reassigned coordinates without representation support are meaningless.
+    if (!representation_.reassignment_supported) {
+        for (size_t i = 0; i < frames_.size(); ++i) {
+            if (!frames_[i].reassigned_times.empty() || !frames_[i].reassigned_freqs.empty()) {
+                r.add_error("frame[" + std::to_string(i) +
+                            "]: reassigned data without representation support");
+                break;
+            }
+        }
     }
 }
 
@@ -1027,6 +1049,20 @@ void write_json_metadata(std::ostringstream& os, const SpectralDataset& d) {
         os << "\"" << json_escape(d.channel_info().channel_names[i]) << "\"";
     }
     os << "]\n";
+    os << "  },\n";
+    // Representation contract (S6.0; JSON-persisted, binary waits for v4).
+    const auto& rep = d.representation();
+    os << "  \"representation\": {\n";
+    os << "    \"kind\": \"" << representation_kind_name(rep.kind) << "\",\n";
+    os << "    \"bins\": " << rep.bins << ",\n";
+    os << "    \"fmin_hz\": " << fp_to_string(rep.fmin_hz) << ",\n";
+    os << "    \"fmax_hz\": " << fp_to_string(rep.fmax_hz) << ",\n";
+    os << "    \"bands\": " << rep.bands << ",\n";
+    os << "    \"q\": " << fp_to_string(rep.q) << ",\n";
+    os << "    \"norm\": \"" << representation_norm_name(rep.norm) << "\",\n";
+    os << "    \"phase\": \"" << (rep.phase == RepresentationPhase::Available ? "available" : "n/a") << "\",\n";
+    os << "    \"reassignment\": " << (rep.reassignment_supported ? "true" : "false") << ",\n";
+    os << "    \"version\": " << rep.version << "\n";
     os << "  }\n";
 }
 
@@ -1377,6 +1413,32 @@ bool SpectralDataset::deserialize_json(const std::string& json) {
             extract_array_strings(find_in_range("channel_names", sec, 0));
     }
 
+    // ---- representation section (absent in pre-S6.0 JSON: STFT default) ----
+    {
+        auto [a, b] = section_range("representation");
+        if (a != std::string::npos) {
+            const std::string sec = json.substr(a, b - a);
+            auto grab = [&](const std::string& k) { return find_in_range(k, sec, 0); };
+            RepresentationKind k = RepresentationKind::STFT;
+            if (!try_parse_representation_kind(extract_string(grab("kind")), k)) return false;
+            representation_.kind = k;
+            representation_.bins = static_cast<int>(extract_number(grab("bins")));
+            representation_.fmin_hz = static_cast<float>(extract_number(grab("fmin_hz")));
+            representation_.fmax_hz = static_cast<float>(extract_number(grab("fmax_hz")));
+            representation_.bands = static_cast<int>(extract_number(grab("bands")));
+            representation_.q = static_cast<float>(extract_number(grab("q")));
+            RepresentationNorm n = RepresentationNorm::None;
+            if (!try_parse_representation_norm(extract_string(grab("norm")), n)) return false;
+            representation_.norm = n;
+            const std::string ph = extract_string(grab("phase"));
+            if (ph != "available" && ph != "n/a") return false;
+            representation_.phase = (ph == "available") ? RepresentationPhase::Available
+                                                          : RepresentationPhase::NotApplicable;
+            representation_.reassignment_supported = extract_bool(grab("reassignment"));
+            representation_.version = static_cast<uint32_t>(extract_number(grab("version")));
+        }
+    }
+
     // ---- frequency_axis section ----
     {
         auto [a, b] = section_range("frequency_axis");
@@ -1522,7 +1584,8 @@ bool SpectralDataset::operator==(const SpectralDataset& other) const {
            normalization_ == other.normalization_ &&
            freq_axis_ == other.freq_axis_ &&
            time_axis_ == other.time_axis_ &&
-           channel_info_ == other.channel_info_;
+           channel_info_ == other.channel_info_ &&
+           representation_ == other.representation_;
 }
 
 } // namespace Spectral
