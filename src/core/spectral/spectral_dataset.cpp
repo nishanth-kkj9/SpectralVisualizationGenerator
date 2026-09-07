@@ -243,20 +243,35 @@ void SpectralDataset::validate_dimensions(ValidationResult& r) const {
         r.add_error("frequency_axis.num_bins must be > 0");
         return;
     }
-    if (nb != analysis_meta_.num_frequency_bins) {
-        r.add_error("frequency_axis.num_bins (" + std::to_string(nb) +
-                    ") != analysis_metadata.num_frequency_bins (" +
-                    std::to_string(analysis_meta_.num_frequency_bins) + ")");
-    }
-    if (nb != freq_axis_.bin_frequencies.size()) {
-        r.add_error("frequency_axis.bin_frequencies size mismatch");
-    }
-    if (analysis_meta_.fft_size > 0) {
-        const int expected = analysis_meta_.fft_size / 2 + 1;
-        if (nb != expected) {
-            r.add_error("num_bins (" + std::to_string(nb) +
-                        ") != fft_size/2+1 (" + std::to_string(expected) + ")");
+    // Representation-aware width contract (S6.0-H1): STFT mirrors the FFT
+    // grid (bins == fft_size/2+1); anything else follows the representation
+    // (explicit bins, never N/2+1). The old universal N/2+1 rule is gone.
+    int expect_bins_decl = nb;
+    if (representation_.is_stft()) {
+        if (analysis_meta_.fft_size > 0) {
+            const int grid = analysis_meta_.fft_size / 2 + 1;
+            if (nb != grid) {
+                r.add_error("frequency_axis.num_bins (" + std::to_string(nb) +
+                            ") != fft_size/2+1 (" + std::to_string(grid) + ")");
+            }
+            expect_bins_decl = grid;
         }
+    } else {
+        // validate_representation() already rejects bins <= 0; widths below
+        // follow the representation only when it is well-formed.
+        if (representation_.bins > 0) expect_bins_decl = representation_.bins;
+    }
+    if (nb != expect_bins_decl) {
+        r.add_error("frequency_axis.num_bins (" + std::to_string(nb) +
+                    ") != representation bin count (" + std::to_string(expect_bins_decl) + ")");
+    }
+    if (analysis_meta_.num_frequency_bins != expect_bins_decl) {
+        r.add_error("analysis_metadata.num_frequency_bins (" +
+                    std::to_string(analysis_meta_.num_frequency_bins) +
+                    ") != representation bin count (" + std::to_string(expect_bins_decl) + ")");
+    }
+    if (nb != static_cast<int>(freq_axis_.bin_frequencies.size())) {
+        r.add_error("frequency_axis.bin_frequencies size mismatch");
     }
     if (time_axis_.num_frames != static_cast<int>(frames_.size())) {
         r.add_error("time_axis.num_frames (" + std::to_string(time_axis_.num_frames) +
@@ -265,20 +280,26 @@ void SpectralDataset::validate_dimensions(ValidationResult& r) const {
     if (time_axis_.frame_times.size() != frames_.size()) {
         r.add_error("time_axis.frame_times size mismatch");
     }
-    // Expected frame width follows the representation: FFT-grid bins for
-    // STFT, explicit representation bins otherwise (never N/2+1 there).
-    const int expect_bins = (!representation_.is_stft() && representation_.bins > 0)
-                                ? representation_.bins
-                                : nb;
+    // Frame widths follow the declared bin count (computed above).
+    const int expect_bins = expect_bins_decl;
     for (size_t i = 0; i < frames_.size(); ++i) {
         const auto& f = frames_[i];
         if (static_cast<int>(f.magnitudes.size()) != expect_bins) {
             r.add_error("frame[" + std::to_string(i) +
                         "].magnitudes size != expected bins");
         }
-        if (static_cast<int>(f.phases.size()) != expect_bins) {
-            r.add_error("frame[" + std::to_string(i) +
-                        "].phases size != expected bins");
+        // Phase semantics: Available requires full coverage; NotApplicable
+        // requires empty (never fabricated phase).
+        if (representation_.phase == RepresentationPhase::Available) {
+            if (static_cast<int>(f.phases.size()) != expect_bins) {
+                r.add_error("frame[" + std::to_string(i) +
+                            "].phases size != expected bins");
+            }
+        } else {
+            if (!f.phases.empty()) {
+                r.add_error("frame[" + std::to_string(i) +
+                            "].phases populated but phase is N/A");
+            }
         }
         if (static_cast<int>(f.power.size()) != expect_bins) {
             r.add_error("frame[" + std::to_string(i) +
@@ -316,24 +337,29 @@ void SpectralDataset::validate_dimensions(ValidationResult& r) const {
             r.add_error("frame[" + std::to_string(i) + "].timestamp not finite");
         }
     }
-    // Bin frequencies must follow k * sr / N, nonnegative and ordered.
-    if (analysis_meta_.fft_size > 0 && analysis_meta_.sample_rate > 0) {
-        for (int k = 0; k < nb && k < static_cast<int>(freq_axis_.bin_frequencies.size()); ++k) {
-            const float expect = static_cast<float>(k) * analysis_meta_.sample_rate /
-                                 static_cast<float>(analysis_meta_.fft_size);
-            if (std::fabs(freq_axis_.bin_frequencies[k] - expect) > 1e-3f * (expect + 1.0f)) {
-                r.add_error("frequency_axis.bin_frequencies[" + std::to_string(k) +
-                            "] != k*sr/N");
-                break;
+    // STFT grid formula; non-STFT axes carry explicit centers (ordered,
+    // nonnegative) instead of k*sr/N.
+    if (representation_.is_stft()) {
+        if (analysis_meta_.fft_size > 0 && analysis_meta_.sample_rate > 0) {
+            for (int k = 0; k < nb && k < static_cast<int>(freq_axis_.bin_frequencies.size()); ++k) {
+                const float expect = static_cast<float>(k) * analysis_meta_.sample_rate /
+                                     static_cast<float>(analysis_meta_.fft_size);
+                if (std::fabs(freq_axis_.bin_frequencies[k] - expect) > 1e-3f * (expect + 1.0f)) {
+                    r.add_error("frequency_axis.bin_frequencies[" + std::to_string(k) +
+                                "] != k*sr/N");
+                    break;
+                }
             }
-            if (freq_axis_.bin_frequencies[k] < 0.0f) {
-                r.add_error("frequency_axis.bin_frequencies has negative entry");
-                break;
-            }
-            if (k > 0 && freq_axis_.bin_frequencies[k] < freq_axis_.bin_frequencies[k - 1]) {
-                r.add_error("frequency_axis.bin_frequencies not ordered");
-                break;
-            }
+        }
+    }
+    for (int k = 0; k < nb && k < static_cast<int>(freq_axis_.bin_frequencies.size()); ++k) {
+        if (freq_axis_.bin_frequencies[k] < 0.0f) {
+            r.add_error("frequency_axis.bin_frequencies has negative entry");
+            break;
+        }
+        if (k > 0 && freq_axis_.bin_frequencies[k] < freq_axis_.bin_frequencies[k - 1]) {
+            r.add_error("frequency_axis.bin_frequencies not ordered");
+            break;
         }
     }
     if (!std::isfinite(freq_axis_.nyquist) || !std::isfinite(freq_axis_.resolution)) {
@@ -394,7 +420,11 @@ void SpectralDataset::validate_metadata(ValidationResult& r) const {
     if (time_axis_.sample_rate != analysis_meta_.sample_rate) {
         r.add_error("time_axis.sample_rate != analysis.sample_rate");
     }
-    if (analysis_meta_.nyquist_frequency != freq_axis_.nyquist) {
+    // STFT axis nyquist is sr/2 by construction; non-STFT axes carry
+    // explicit maxima (e.g. highest Mel center), so equality applies
+    // to STFT only.
+    if (representation_.is_stft() &&
+        analysis_meta_.nyquist_frequency != freq_axis_.nyquist) {
         r.add_error("analysis_metadata.nyquist != frequency_axis.nyquist");
     }
     if (time_axis_.hop_size != analysis_meta_.hop_size) {
@@ -923,6 +953,10 @@ bool SpectralDataset::read_frames(const uint8_t* data, size_t size, size_t& off)
 
 bool SpectralDataset::serialize_binary(std::vector<uint8_t>& out) const {
     out.clear();
+    // v3 binary is STFT-only: it carries no representation metadata, so
+    // serializing anything else would silently mislabel the data.
+    // Non-STFT persistence waits for the v4 layout (fail closed here).
+    if (!representation_.is_stft()) return false;
     // Rough reserve — header + metadata + axes + frames (mag/phs/pwr +
     // reassigned pair). Avoids repeated realloc during append.
     const size_t est = BINARY_HEADER_SIZE + 1024 +
@@ -984,6 +1018,10 @@ bool SpectralDataset::deserialize_binary(const uint8_t* data, size_t size) {
 }
 
 std::string SpectralDataset::dataset_identity() const {
+    // Identity hashes the canonical v3 bytes, which exclude representation
+    // metadata. Safe for STFT; for anything else it would hash an
+    // incomplete picture, so fail closed (empty) until v4 exists.
+    if (!representation_.is_stft()) return {};
     std::vector<uint8_t> buf;
     if (!serialize_binary(buf)) return {};
     return sha256_hex(buf.data(), buf.size());

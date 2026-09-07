@@ -51,6 +51,22 @@ it too. The v3 **binary** deliberately excludes it (see below).
 
 ## Dataset v4 boundary (decision: YES, later)
 
+Hardened in S6.0-H1 (contracts now enforced, not just described):
+
+- v3 binary datasets are STFT-only. `serialize_binary()` fails closed
+  (returns false, no partial bytes) for any non-STFT representation;
+  v3 has no version change and no new wire fields.
+- Non-STFT dataset identity is unavailable until v4:
+  `dataset_identity()` returns empty rather than hashing an incomplete
+  picture. STFT identity is unchanged and deterministic.
+- `FrequencyAxis` is representation-aware: STFT builds the exact FFT
+  grid; non-STFT uses `from_centers()` with explicit per-bin centers.
+  Validation requires axis/metadata/frame widths to equal the
+  representation bin count (STFT: `fft_size/2+1`).
+- Phase is optional per representation: `Available` requires full
+  per-frame coverage; `NotApplicable` requires empty vectors (populated
+  phase under N/A is rejected — never fabricated).
+
 v4 is required because non-STFT data changes the meaning and shape of
 frequency payloads. v4 must add: a representation section to the binary
 layout, per-kind bin-count rules in the frame reader (replacing the

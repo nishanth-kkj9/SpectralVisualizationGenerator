@@ -151,15 +151,31 @@ struct NormalizationInfo {
 // ============================================================================
 // Frequency axis
 // ============================================================================
+// FrequencyAxis is representation-aware, not FFT-only: STFT builds the
+// exact FFT grid via FrequencyAxis(n_fft, sr); non-STFT representations
+// use from_centers() with explicit per-bin centers (never N/2+1).
 struct FrequencyAxis {
     int num_bins = 0;
-    int fft_size = 0;
+    int fft_size = 0;  // meaningful for STFT only; 0 otherwise
     int sample_rate = 0;
     std::vector<float> bin_frequencies;  // Size = num_bins
     float nyquist = 0.0f;
-    float resolution = 0.0f;             // Hz per bin
+    float resolution = 0.0f;             // Hz per bin (STFT); nominal otherwise
     
     FrequencyAxis() = default;
+    static FrequencyAxis from_centers(const std::vector<float>& centers, int sr) {
+        FrequencyAxis ax;
+        ax.num_bins = static_cast<int>(centers.size());
+        ax.fft_size = 0;
+        ax.sample_rate = sr;
+        ax.bin_frequencies = centers;
+        ax.nyquist = centers.empty() ? 0.0f : centers.back();
+        ax.resolution = centers.size() > 1
+                            ? (centers.back() - centers.front()) /
+                                  static_cast<float>(centers.size() - 1)
+                            : 0.0f;
+        return ax;
+    }
     FrequencyAxis(int n_fft, int sr) : fft_size(n_fft), sample_rate(sr) {
         num_bins = n_fft / 2 + 1;
         resolution = static_cast<float>(sr) / static_cast<float>(n_fft);

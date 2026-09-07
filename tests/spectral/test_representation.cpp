@@ -194,51 +194,136 @@ static void test_path_independence() {
     CHECK(a.analysis_fingerprint() == b.analysis_fingerprint(), "path never moves fp");
 }
 
-static void test_dataset_coherence() {
-    std::printf("[dataset_coherence]\n");
-    // Mel dataset with matching frames validates; mismatched rejected.
+static SpectralDataset make_mel64() {
+    // Valid semantic shape: representation bins = axis bins = metadata
+    // bins = frame width = 64; phases empty (N/A); explicit centers.
     SpectralDataset d;
     d.mutable_analysis_metadata().fft_size = 1024;
     d.mutable_analysis_metadata().hop_size = 512;
     d.mutable_analysis_metadata().sample_rate = 44100;
-    d.mutable_analysis_metadata().num_frequency_bins = 513;
-    d.mutable_frequency_axis() = FrequencyAxis(1024, 44100);
+    d.mutable_analysis_metadata().num_frequency_bins = 64;
+    std::vector<float> centers(64);
+    for (int k = 0; k < 64; ++k) centers[static_cast<size_t>(k)] = 20.0f + k * 125.0f;
+    d.mutable_frequency_axis() = FrequencyAxis::from_centers(centers, 44100);
     d.mutable_time_axis() = TimeAxis(2, 512, 44100);
     auto& rep = d.mutable_representation();
     rep.kind = RepresentationKind::Mel;
     rep.bins = 64;
     rep.fmin_hz = 20.0f;
-    rep.fmax_hz = 8000.0f;
+    rep.fmax_hz = 20.0f + 63 * 125.0f;
     rep.bands = 64;
     rep.phase = RepresentationPhase::NotApplicable;
     for (int i = 0; i < 2; ++i) {
         SpectralFrame f;
         f.frame_index = i;
-        f.n_fft = 1024;
+        f.n_fft = 0;  // meaningless for Mel; must not be checked
         f.timestamp = i * 512.0 / 44100.0;
         f.magnitudes.assign(64, 0.1f);
-        f.phases.assign(64, 0.0f);
         f.power.assign(64, 0.01f);
+        // phases stays empty: N/A means N/A
         d.add_frame(f);
     }
+    return d;
+}
+
+static void test_dataset_coherence() {
+    std::printf("[dataset_coherence]\n");
+    SpectralDataset d = make_mel64();
     CHECK(!d.validate().has_errors(), "mel-shaped dataset validates");
     SpectralDataset bad = d;
     SpectralFrame extra;
     extra.frame_index = 9;
-    extra.n_fft = 1024;
-    extra.magnitudes.assign(513, 0.1f);  // FFT-sized frame in a Mel dataset
-    extra.phases.assign(513, 0.0f);
+    extra.magnitudes.assign(513, 0.1f);  // FFT-shaped frame in Mel data
     extra.power.assign(513, 0.01f);
     bad.add_frame(extra);
     CHECK(bad.validate().has_errors(), "FFT-sized frame in Mel rejected");
-    // frame phase vectors may exist but representation marks them N/A:
-    // contract only requires magnitudes; document, don't fabricate.
-    CHECK(d.frame(0).phases.size() == 64, "phase storage present but N/A");
+    SpectralDataset phased = d;
+    SpectralFrame pf;
+    phased.get_frame(0, pf);
+    pf.phases.assign(64, 0.0f);  // fabricated phase under N/A
+    // replace frame 0: rebuild (frames are value-stored)
+    SpectralDataset ph2;
+    ph2.mutable_analysis_metadata() = phased.analysis_metadata();
+    ph2.mutable_frequency_axis() = phased.frequency_axis();
+    ph2.mutable_time_axis() = phased.time_axis();
+    ph2.mutable_channel_info() = phased.channel_info();
+    ph2.mutable_normalization_info() = phased.normalization_info();
+    ph2.mutable_source_metadata() = phased.source_metadata();
+    ph2.mutable_representation() = phased.representation();
+    ph2.add_frame(pf);
+    SpectralFrame f1;
+    phased.get_frame(1, f1);
+    ph2.add_frame(f1);
+    CHECK(ph2.validate().has_errors(), "populated phase under N/A rejected");
     // representation survives the JSON path (binary waits for v4).
     SpectralDataset rt;
     CHECK(rt.deserialize_json(d.serialize_json(false)), "json loads");
     CHECK(rt.representation() == d.representation(), "representation JSON RT");
     CHECK(!rt.validate().has_errors(), "reloaded validates");
+}
+
+static void test_v3_and_identity_gates() {
+    std::printf("[v3_and_identity_gates]\n");
+    // J: non-STFT datasets fail closed on v3 binary serialization.
+    SpectralDataset mel = make_mel64();
+    std::vector<uint8_t> buf;
+    CHECK(!mel.serialize_binary(buf), "Mel binary rejected");
+    CHECK(buf.empty(), "no partial bytes emitted");
+    // K: non-STFT identity fails safe (empty), never a fake hash.
+    CHECK(mel.dataset_identity().empty(), "Mel identity unavailable");
+    // L/M: STFT behavior unchanged (covered in depth by the spectral
+    // suite; pinned here so the gates above cannot regress it).
+    SpectralDataset stft;
+    stft.mutable_analysis_metadata().fft_size = 8;
+    stft.mutable_analysis_metadata().hop_size = 4;
+    stft.mutable_analysis_metadata().sample_rate = 8000;
+    stft.mutable_analysis_metadata().num_frequency_bins = 5;
+    stft.mutable_frequency_axis() = FrequencyAxis(8, 8000);
+    stft.mutable_time_axis() = TimeAxis(1, 4, 8000);
+    SpectralFrame f;
+    f.frame_index = 0;
+    f.n_fft = 8;
+    f.magnitudes.assign(5, 0.2f);
+    f.phases.assign(5, 0.0f);
+    f.power.assign(5, 0.04f);
+    stft.add_frame(f);
+    CHECK(stft.serialize_binary(buf), "STFT binary still works");
+    CHECK(stft.dataset_identity().size() == 64, "STFT identity intact");
+    // I: reassignment arrays without support are rejected.
+    SpectralDataset bad = make_mel64();  // support defaults to false
+    SpectralFrame bf;
+    bad.get_frame(0, bf);
+    bf.reassigned_times.assign(64, 0.0f);
+    bf.reassigned_freqs.assign(64, 0.0f);
+    SpectralDataset bad2;
+    bad2.mutable_analysis_metadata() = bad.analysis_metadata();
+    bad2.mutable_frequency_axis() = bad.frequency_axis();
+    bad2.mutable_time_axis() = bad.time_axis();
+    bad2.mutable_channel_info() = bad.channel_info();
+    bad2.mutable_normalization_info() = bad.normalization_info();
+    bad2.mutable_source_metadata() = bad.source_metadata();
+    bad2.mutable_representation() = bad.representation();
+    bad2.add_frame(bf);
+    SpectralFrame bf1;
+    bad.get_frame(1, bf1);
+    bad2.add_frame(bf1);
+    CHECK(bad2.validate().has_errors(), "unsupported reassignment rejected");
+    // F-missing: Available phase with empty vectors is rejected.
+    SpectralDataset no_phase;
+    no_phase.mutable_analysis_metadata().fft_size = 8;
+    no_phase.mutable_analysis_metadata().hop_size = 4;
+    no_phase.mutable_analysis_metadata().sample_rate = 8000;
+    no_phase.mutable_analysis_metadata().num_frequency_bins = 5;
+    no_phase.mutable_frequency_axis() = FrequencyAxis(8, 8000);
+    no_phase.mutable_time_axis() = TimeAxis(1, 4, 8000);
+    SpectralFrame nf;
+    nf.frame_index = 0;
+    nf.n_fft = 8;
+    nf.magnitudes.assign(5, 0.2f);
+    nf.power.assign(5, 0.04f);
+    // phases stays empty while representation says Available
+    no_phase.add_frame(nf);
+    CHECK(no_phase.validate().has_errors(), "missing phase under Available rejected");
 }
 
 int main() {
@@ -249,6 +334,7 @@ int main() {
     test_fingerprint_tracks_representation();
     test_path_independence();
     test_dataset_coherence();
+    test_v3_and_identity_gates();
     std::printf("\n=== representation: %d/%d passed ===\n", g_pass, g_run);
     return (g_pass == g_run) ? 0 : 1;
 }
