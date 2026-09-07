@@ -1,13 +1,25 @@
 #pragma once
 
-// S3 — Safe child-process abstraction (Windows).
+// S3 + Phase 1 — Safe child-process abstraction (Windows).
 // No shell is ever involved: argv elements are quoted per
 // CommandLineToArgvW rules and passed directly to CreateProcessW,
 // so hostile paths/args stay literal and cannot become commands.
 // Binary-safe pipes (no text-mode translation) for PCM I/O.
+//
+// Phase 1 lifetime model (read before touching):
+// - The stderr drain thread is ALWAYS joined before its pipe handle is
+//   closed, before the buffer is reset, and before destruction —
+//   regardless of whether the child already exited.
+// - kill()/cleanup()/spawn()/dtor are safe in any order and any number
+//   of times; wait() is re-entrant and returns the stored exit code.
+// - stderr capture survives wait()/cleanup() and is reset only by the
+//   next spawn(), so diagnostics are never lost or mixed across runs.
 
+#include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace Spectral {
@@ -23,6 +35,11 @@ std::string resolve_tool(const std::string& kind);
 // Quote one argv element per MSVCRT CommandLineToArgvW rules.
 std::string quote_arg(const std::string& arg);
 
+#ifdef _MSC_VER
+#pragma warning(push)
+// 1-byte tail padding after the grouped flag byte is benign and intentional.
+#pragma warning(disable : 4820)
+#endif
 class SafeProcess {
 public:
     SafeProcess() = default;
@@ -39,7 +56,8 @@ public:
 
     // Spawn exe with its arguments (do NOT include the program name in
     // argv — it is derived from exe). Returns false if the process could
-    // not be started (last_error set).
+    // not be started (last_error set). Any previous process/state is
+    // released first, so spawn() is safe to call repeatedly.
     bool spawn(const std::string& exe, const std::vector<std::string>& argv,
                const Options& opts);
 
@@ -52,33 +70,50 @@ public:
     // stdout: bytes read, 0 = EOF, (size_t)-1 = error.
     size_t read_stdout(uint8_t* out, size_t max_size);
 
-    // stderr drained during run; full text available after wait().
+    // stderr drained during run; full text stays available after wait()
+    // and cleanup(), until the next spawn().
     std::string stderr_text();
 
-    // exit code after wait(); -1 if never started / still running.
+    // exit code after wait(); stored code when re-called or after cleanup;
+    // -1 if never successfully spawned.
     int wait();
     int exit_code() const { return exit_code_; }
 
-    // Force-terminate (used by dtor + cancellation paths).
+    // Force-terminate if running (no-op otherwise), then join the drain
+    // thread. Safe to call in any state, any number of times.
     void kill();
+
+    // Release all OS resources (joins the drain thread first). Safe to
+    // call in any state, any number of times. Keeps captured stderr text.
+    void cleanup();
 
     std::string last_error() const { return last_error_; }
 
 private:
-    void cleanup();
+    // Join the drain thread if active. Never blocks forever: the thread
+    // only blocks in ReadFile, which unblocks on child death or pipe
+    // close — callers terminate/confirm death before joining a live child.
+    void join_err_thread();
+    void close_handles();
+
     void drain_stderr();
 
-    void* proc_ = nullptr;    // HANDLE
-    void* thread_ = nullptr;  // primary thread HANDLE
-    void* child_stdin_ = nullptr;
+    void* proc_ = nullptr;         // HANDLE, null when none owned
+    void* child_stdin_ = nullptr;  // HANDLEs, null when not owned/closed
     void* child_stdout_ = nullptr;
     void* child_stderr_ = nullptr;
-    void* err_thread_ = nullptr;
-    std::string stderr_buf_;
-    void* stderr_mutex_ = nullptr;
-    int exit_code_ = -1;
-    bool killed_ = false;
+    std::thread err_thread_;       // value member: join() or detach() enforced
+    std::mutex stderr_mutex_;      // value member: always safe to lock
+    std::string stderr_buf_;       // reset only by spawn()
     std::string last_error_;
+    int exit_code_ = -1;
+    // 1-byte tail grouped to avoid padding warnings: do not interleave.
+    std::atomic<bool> stop_drain_{false};
+    bool has_process_ = false;
+    bool killed_ = false;
 };
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
 } // namespace Spectral

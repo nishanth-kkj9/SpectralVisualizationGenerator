@@ -201,6 +201,17 @@ set_target_properties(test_media PROPERTIES
 )
 add_test(NAME media_decoder COMMAND test_media)
 
+add_executable(test_safe_process
+    tests/process/test_safe_process.cpp
+)
+target_link_libraries(test_safe_process PRIVATE SpectralCore)
+set_target_properties(test_safe_process PROPERTIES
+    CXX_VISIBILITY_PRESET "hidden"
+    CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
+    WIN32_EXECUTABLE OFF
+)
+add_test(NAME safe_process COMMAND test_safe_process)
+
 set_target_properties(media_probe PROPERTIES
     CXX_VISIBILITY_PRESET "hidden"
     CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
