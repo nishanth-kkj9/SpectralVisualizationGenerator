@@ -261,6 +261,20 @@ add_executable(test_fft
     tests/dsp/test_fft.cpp
 )
 
+add_executable(test_fft_plan
+    tests/dsp/test_fft_plan.cpp
+)
+target_include_directories(test_fft_plan PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
+)
+target_link_libraries(test_fft_plan PRIVATE SpectralCore)
+set_target_properties(test_fft_plan PROPERTIES
+    CXX_VISIBILITY_PRESET "hidden"
+    CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
+    WIN32_EXECUTABLE OFF
+)
+add_test(NAME fft_plan COMMAND test_fft_plan)
+
 add_executable(test_dsp_accuracy
     tests/dsp/test_dsp_accuracy.cpp
 )

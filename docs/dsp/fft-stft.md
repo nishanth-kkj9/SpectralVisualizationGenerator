@@ -23,6 +23,27 @@ float32 eps ≈ 1.2e-7 scaled by FFT error growth (~log2 N).
 - `CPUBackend::fft` forwards to `::fft` — an adapter, not a second
   implementation. No GPU FFT exists (`gpu_backend.h` throws).
 
+## Reusable plans and workspace (Phase 7, `src/core/dsp/fft_plan.h`)
+
+- `FFTPlan::create(N)` precomputes, once per size: the bit-reversal swap
+  sequence (identical order to `fft_bit_reverse`) and one twiddle table
+  per stage with entries computed by the *same* `ftwiddle(N, j, N/len)`
+  expression the loop used. Invalid sizes yield an invalid plan; executors
+  refuse it (fail-closed, never UB).
+- Plans are immutable after construction and safe to share; `FFTWorkspace`
+  holds three reusable N-element complex buffers owned per analysis
+  context (one per `analyze_dataset` call, one per multiband band) — no
+  global mutable scratch, so concurrent analyses stay independent.
+- `fft_forward`/`fft_inverse` replay the exact `fft()` algorithm (same
+  butterfly, same order) and are **bit-identical** to it (proven by
+  `tests/dsp/test_fft_plan.cpp`, 270 checks).
+- Production paths (`analyze_dataset` STFT + reassignment, multiband
+  direct-FFT branch) execute through plan/workspace: no per-frame trig,
+  no per-frame FFT scratch allocation. `fft()`, `stft_frame()`,
+  `stft_all()` keep their original implementations as the independent
+  reference and compatibility path — they are not used inside the
+  production loop.
+
 ## STFT (`src/core/dsp/stft.h`, the single production frame math)
 
 - Parameters are explicit: sample rate, `n_fft`, hop, prebuilt window +

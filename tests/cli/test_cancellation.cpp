@@ -437,7 +437,8 @@ static void test_cli_cancel() {
         return;
     }
     const fs::path wav = g_dir / "cli_long.wav";
-    write_wav(wav, 300);  // ~26MB + heavy analysis: tens of seconds of work
+    write_wav(wav, 600);  // ~52MB + heavy analysis: tens of seconds of work
+                          // even with the planned FFT engine
     const fs::path out = g_dir / "cli_cancel.png";
     const int base_ff = count_ffmpeg();
 
@@ -453,8 +454,8 @@ static void test_cli_cancel() {
           "spectragen child spawned");
     CloseHandle(pi.hThread);
     // Decode plus heavy analysis run for tens of seconds; a short delay
-    // lands the break provably mid-flight.
-    std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+    // lands the break provably mid-flight (mid-analysis, post-decode).
+    std::this_thread::sleep_for(std::chrono::milliseconds(2500));
     CHECK(GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pi.dwProcessId), "break delivered");
     const DWORD wait = WaitForSingleObject(pi.hProcess, 30000);
     DWORD code = 0;

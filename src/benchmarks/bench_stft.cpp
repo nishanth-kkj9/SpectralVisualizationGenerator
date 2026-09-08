@@ -1,5 +1,6 @@
 #include "benchmark_harness.h"
 #include "../core/dsp/fft.h"
+#include "../core/dsp/fft_plan.h"
 #include <vector>
 #include <string>
 
@@ -19,15 +20,21 @@ bench::Result bench_stft(int sample_rate, int fft_size, int duration_sec) {
 
     std::vector<std::vector<float>> spectrogram(num_frames, std::vector<float>(fft_size / 2 + 1));
 
+    // Production path (Phase 7): one immutable plan + one reusable
+    // workspace for all frames — no per-frame trig, no per-frame FFT
+    // scratch allocation. Same window/loop/magnitude shape as above.
+    Spectral::FFTPlan plan = Spectral::FFTPlan::create(fft_size);
+    Spectral::FFTWorkspace ws(plan);
+
     auto cpu0 = bench::cpu_time_ms();
     auto wall = bench::bench_fn([&]() {
         for (int f = 0; f < num_frames; ++f) {
             int offset = f * hop;
-            std::vector<complex_f> spectrum(fft_size);
+            std::vector<complex_f>& spectrum = ws.buf(0);
             for (int i = 0; i < fft_size; ++i) {
                 spectrum[i] = {audio[offset + i] * window[i], 0.0f};
             }
-            fft(spectrum);
+            Spectral::fft_forward(plan, ws, 0);
             for (int k = 0; k < fft_size / 2 + 1; ++k) {
                 spectrogram[f][k] = std::sqrt(spectrum[k].real() * spectrum[k].real() + spectrum[k].imag() * spectrum[k].imag());
             }

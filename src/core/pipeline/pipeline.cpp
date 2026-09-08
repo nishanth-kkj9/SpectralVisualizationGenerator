@@ -1,6 +1,7 @@
 #include "pipeline.h"
 
 #include "fft.h"
+#include "fft_plan.h"
 #include "stft.h"
 #include "media_decoder.h"
 #include "spectrogram_renderer.h"
@@ -260,6 +261,28 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
                            "config: unsupported window type");
     float cg = pc.analysis.window_coherent_gain;
     const int num_bins = fft_n / 2 + 1;
+    // Reusable FFT execution state, owned by this analysis call (never
+    // global): one immutable plan plus three reusable scratch buffers
+    // (main spectrum + the two reassignment transforms). Previously every
+    // frame allocated three N-element complex vectors and recomputed
+    // (N/2)*log2(N) trig pairs; now the hot loop performs no FFT scratch
+    // allocation and no per-frame trig at all.
+    const FFTPlan fft_plan = FFTPlan::create(fft_n);
+    if (!fft_plan.valid())
+        return Error::make(Subsystem::Dsp, JobError::AnalysisError,
+                           "dsp: invalid fft size " + std::to_string(fft_n));
+    FFTWorkspace fft_ws(fft_plan);
+    // Reassignment derivative window depends only on fft size: hoist out
+    // of the per-frame loop (identical values, computed once).
+    std::vector<float> w_deriv;
+    if (cfg.reassigned) {
+        w_deriv.resize(static_cast<size_t>(fft_n));
+        for (int j = 0; j < fft_n; ++j)
+            w_deriv[static_cast<size_t>(j)] = static_cast<float>(PI) /
+                                              static_cast<float>(fft_n - 1) *
+                                              std::sin(2.0f * PI * static_cast<float>(j) /
+                                                       static_cast<float>(fft_n - 1));
+    }
     // Frame-count estimate for progress (exact at EOF). total_frames() is
     // duration-derived until a clean EOF; never zero-divided, never >100%.
     const int64_t est_total = decoder.total_frames();
@@ -344,29 +367,46 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
                 return Error::make(Subsystem::Pipeline, JobError::Cancelled,
                                    "pipeline: cancelled during analysis");
             }
-            StftFrame fr;
-            // stft_frame validates start+n_fft <= total: pass the live
-            // window size with the span rebased to zero.
-            if (!stft_frame(span, fft_n, 0, fft_n, sr, win, cg, fr)) {
+            // Windowed fill of reusable scratch buffer 0, then the planned
+            // forward transform: no per-frame allocation, no per-frame
+            // trig. This is the same mathematics as stft_frame() (same
+            // window multiply, same butterfly order, same normalization
+            // below); stft_frame() keeps its own implementation as the
+            // independent reference used by tests.
+            std::vector<complex_f>& spec = fft_ws.buf(0);
+            for (int j = 0; j < fft_n; ++j)
+                spec[static_cast<size_t>(j)] =
+                    complex_f(span[j] * win[static_cast<size_t>(j)], 0.0f);
+            if (!fft_forward(fft_plan, fft_ws, 0)) {
                 decoder.close();
                 return Error::make(Subsystem::Dsp, JobError::AnalysisError,
                                    "dsp: stft frame failed at sample " +
                                        std::to_string(abs_start));
             }
-            // Buffer-relative start is always 0 here; restore the absolute
-            // timestamp policy (frame start / sample rate, in double).
-            fr.timestamp = static_cast<double>(abs_start) / static_cast<double>(sr);
-            fr.frame_index = frame_idx;
-            std::vector<complex_f>& buf = fr.spectrum;
 
             SpectralFrame sf;
             sf.frame_index = frame_idx;
             sf.n_fft = fft_n;
             sf.window_factor = cg;
-            sf.timestamp = fr.timestamp;
-            sf.magnitudes = std::move(fr.magnitudes);
-            sf.phases = std::move(fr.phases);
-            sf.power = std::move(fr.power);
+            // Absolute timestamp policy (frame start / sample rate).
+            sf.timestamp = static_cast<double>(abs_start) / static_cast<double>(sr);
+            sf.magnitudes.resize(static_cast<size_t>(num_bins));
+            sf.phases.resize(static_cast<size_t>(num_bins));
+            sf.power.resize(static_cast<size_t>(num_bins));
+            {
+                // One-sided amplitude correction: identical to stft_frame()
+                // (interior bins doubled, DC/Nyquist single, norm 1/(N*cg)).
+                const float norm = 1.0f / (static_cast<float>(fft_n) * cg);
+                for (int k = 0; k < num_bins; ++k) {
+                    const float re = spec[static_cast<size_t>(k)].real();
+                    const float im = spec[static_cast<size_t>(k)].imag();
+                    float mag = std::sqrt(re * re + im * im) * norm;
+                    if (k > 0 && k < fft_n / 2) mag *= 2.0f;
+                    sf.magnitudes[static_cast<size_t>(k)] = mag;
+                    sf.phases[static_cast<size_t>(k)] = std::atan2(im, re);
+                    sf.power[static_cast<size_t>(k)] = mag * mag;
+                }
+            }
 
             float sum_sq = 0.0f, peak = 0.0f, cn = 0.0f, cd = 0.0f;
             for (int k = 0; k < num_bins; ++k) {
@@ -383,30 +423,36 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
             sf.spectral_centroid = (cd > 0.0f) ? cn / cd : 0.0f;
 
             if (cfg.reassigned) {
-                // The full N-sample frame is live in span: identical inputs,
-                // identical order, identical results to the batch path.
-                std::vector<complex_f> X_tau(static_cast<size_t>(fft_n));
+                // Reassignment through the same plan/workspace: buffer 1
+                // holds X_tau, buffer 2 holds X_dg, buffer 0 (main
+                // spectrum) is untouched while both transform in place.
+                // Same inputs, same order, same formulas as before.
+                std::vector<complex_f>& X_tau = fft_ws.buf(1);
                 for (int j = 0; j < fft_n; ++j)
                     X_tau[static_cast<size_t>(j)] = complex_f(
                         static_cast<float>(j) * win[static_cast<size_t>(j)] * span[j],
                         0.0f);
-                fft(X_tau);
-                std::vector<float> w_deriv(static_cast<size_t>(fft_n));
-                for (int j = 0; j < fft_n; ++j)
-                    w_deriv[static_cast<size_t>(j)] =
-                        static_cast<float>(PI) / static_cast<float>(fft_n - 1) *
-                        std::sin(2.0f * PI * static_cast<float>(j) /
-                                 static_cast<float>(fft_n - 1));
-                std::vector<complex_f> X_dg(static_cast<size_t>(fft_n));
+                if (!fft_forward(fft_plan, fft_ws, 1)) {
+                    decoder.close();
+                    return Error::make(Subsystem::Dsp, JobError::AnalysisError,
+                                       "dsp: reassignment fft failed at sample " +
+                                           std::to_string(abs_start));
+                }
+                std::vector<complex_f>& X_dg = fft_ws.buf(2);
                 for (int j = 0; j < fft_n; ++j)
                     X_dg[static_cast<size_t>(j)] =
                         complex_f(w_deriv[static_cast<size_t>(j)] * span[j], 0.0f);
-                fft(X_dg);
+                if (!fft_forward(fft_plan, fft_ws, 2)) {
+                    decoder.close();
+                    return Error::make(Subsystem::Dsp, JobError::AnalysisError,
+                                       "dsp: reassignment fft failed at sample " +
+                                           std::to_string(abs_start));
+                }
                 sf.reassigned_times.resize(static_cast<size_t>(num_bins));
                 sf.reassigned_freqs.resize(static_cast<size_t>(num_bins));
                 for (int k = 0; k < num_bins; ++k) {
-                    float re = buf[static_cast<size_t>(k)].real();
-                    float im = buf[static_cast<size_t>(k)].imag();
+                    float re = spec[static_cast<size_t>(k)].real();
+                    float im = spec[static_cast<size_t>(k)].imag();
                     float mag_sq = re * re + im * im;
                     if (mag_sq > 1e-12f) {
                         complex_f conj_X(re, -im);

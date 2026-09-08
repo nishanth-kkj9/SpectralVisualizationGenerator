@@ -1,6 +1,7 @@
 #include "multiband_analyzer.h"
 #include "spectral_backend.h"
 #include "fft.h"
+#include "fft_plan.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -115,6 +116,16 @@ MultiBandAnalyzer::AnalyzeResult MultiBandAnalyzer::analyze(
 
         float bin_hz_band = static_cast<float>(sample_rate) / static_cast<float>(band.n_fft);
 
+        // Reusable plan + scratch for this band size (owned by this call,
+        // never global). The backend path keeps its own execution model.
+        FFTPlan band_plan;
+        FFTWorkspace band_ws;
+        const bool use_plan = (backend == nullptr);
+        if (use_plan) {
+            band_plan = FFTPlan::create(band.n_fft);
+            band_ws.assign(band_plan);
+        }
+
         for (int f = 0; f < num_frames; ++f) {
             int band_frame = static_cast<int>(static_cast<float>(f) * static_cast<float>(band_hop) / static_cast<float>(common_hop));
             if (band_frame >= band_frames) band_frame = band_frames - 1;
@@ -124,12 +135,48 @@ MultiBandAnalyzer::AnalyzeResult MultiBandAnalyzer::analyze(
             if (offset + band.n_fft > static_cast<int>(samples.size())) break;
 
             const auto& win = get_window(band.n_fft);
-            std::vector<complex_f> buf(band.n_fft);
+            // Planned path fills only the reusable scratch buffer (no
+            // per-frame vector). Other paths keep the legacy local buf.
+            const bool planned =
+                use_plan && band_plan.valid() && band_ws.valid();
+            std::vector<complex_f> buf(planned ? 0 : band.n_fft);
+            std::vector<complex_f>& work = planned ? band_ws.buf(0) : buf;
             for (int i = 0; i < band.n_fft; ++i) {
-                buf[i] = complex_f(samples[offset + i] * win[i], 0.0f);
+                work[i] = complex_f(samples[offset + i] * win[i], 0.0f);
             }
             if (backend) {
                 backend->fft(buf);
+            } else if (planned) {
+                // Bit-identical to fft(buf); fail-safe fallback below.
+                if (!fft_forward(band_plan, band_ws, 0)) {
+                    buf.assign(band.n_fft, complex_f());
+                    for (int i = 0; i < band.n_fft; ++i) {
+                        buf[i] = complex_f(samples[offset + i] * win[i], 0.0f);
+                    }
+                    fft(buf);
+                    auto [mag0, pwr0] = fft_magnitude_power(buf);
+                    for (int b_bin = 0; b_bin < band_bins; ++b_bin) {
+                        float freq = static_cast<float>(b_bin) * bin_hz_band;
+                        int max_bin = static_cast<int>(std::round(freq / bin_hz_max));
+                        if (max_bin >= start_bin && max_bin <= end_bin &&
+                            max_bin < total_bins) {
+                            br.magnitudes[f][max_bin] = mag0[b_bin];
+                            br.power[f][max_bin] = pwr0[b_bin];
+                        }
+                    }
+                    continue;
+                }
+                auto [mag, pwr] = fft_magnitude_power(band_ws.buf(0));
+                for (int b_bin = 0; b_bin < band_bins; ++b_bin) {
+                    float freq = static_cast<float>(b_bin) * bin_hz_band;
+                    int max_bin = static_cast<int>(std::round(freq / bin_hz_max));
+                    if (max_bin >= start_bin && max_bin <= end_bin &&
+                        max_bin < total_bins) {
+                        br.magnitudes[f][max_bin] = mag[b_bin];
+                        br.power[f][max_bin] = pwr[b_bin];
+                    }
+                }
+                continue;
             } else {
                 fft(buf);
             }

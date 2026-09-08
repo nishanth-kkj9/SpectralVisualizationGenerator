@@ -33,3 +33,16 @@ Streaming analysis (Phase 6), measured 2026-09-09 with
 Peak RSS grows with sample rate because the `SpectralDataset` holds more
 spectral frames for the same duration; the raw-audio working set stays at
 tens of KiB regardless of duration.
+
+FFT plan/workspace optimization (Phase 7), same machine class,
+`spectral_benchmarks --quick` (60 s inputs):
+
+| Benchmark | before (per-frame trig + alloc) | after (plan + workspace) |
+|-----------|---------------------------------|--------------------------|
+| STFT loop (`stft` bench) | ~7–11 MB/s audio | ~30–40 MB/s audio |
+| End-to-end streaming analysis | ~10–16 MB/s audio | ~20–26 MB/s audio |
+
+The end-to-end gain is smaller because decode (unchanged) dominates that
+path; the STFT loop itself is ~3.5–4× faster. Reproduce with
+`spectral_benchmarks --quick --benchmark stft` and `--benchmark
+streaming_analysis` (single iteration per cell for the latter).
