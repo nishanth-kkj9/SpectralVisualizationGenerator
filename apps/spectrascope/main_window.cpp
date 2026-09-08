@@ -204,6 +204,9 @@ void MainWindow::setRunning(bool running) {
 }
 
 void MainWindow::generate() {
+    // A deferred close is pending: the window is going away, so no new
+    // jobs may start (this also keeps closing_ meaningful).
+    if (closing_) return;
     Spectral::GenerateConfig cfg;
     cfg.input_path = inputEdit_->text().toStdString();
     cfg.output_path = outputEdit_->text().toStdString();
@@ -240,6 +243,7 @@ void MainWindow::generate() {
     connect(worker, &Worker::progress, this, &MainWindow::onProgress);
     connect(worker, &Worker::finished, this, &MainWindow::onFinished);
     connect(worker, &Worker::finished, thread_, &QThread::quit);
+    connect(thread_, &QThread::finished, this, &MainWindow::onThreadFinished);
     connect(thread_, &QThread::finished, worker, &QObject::deleteLater);
     connect(thread_, &QThread::finished, thread_, &QObject::deleteLater);
     thread_->start();
@@ -257,10 +261,16 @@ void MainWindow::cancelJob() {
 
 void MainWindow::closeEvent(QCloseEvent* event) {
     if (thread_) {
+        // A worker thread object is still alive (running or finishing):
+        // request cancellation and DEFER the close. The window stays alive
+        // until onThreadFinished clears thread_ and re-issues close().
+        // Never blocks, so no deadlock with the worker (which never waits
+        // on the GUI thread); a second close simply defers again.
         cancel_.store(true);
-        // The worker aborts promptly at stage boundaries; wait for its
-        // cleanup (temp removal, child termination) before tearing down.
-        thread_->wait(30000);
+        closing_ = true;
+        statusLabel_->setText(QStringLiteral("Cancelling…"));
+        event->ignore();
+        return;
     }
     QMainWindow::closeEvent(event);
 }
@@ -271,7 +281,11 @@ void MainWindow::onProgress(int percent, const QString& stage) {
 }
 
 void MainWindow::onFinished(bool ok, const QString& message, const QString& outputPath) {
-    thread_ = nullptr;
+    // NOTE: thread_ is NOT cleared here. The worker-finished signal is
+    // queued ahead of the thread-quit, so the QThread object may still be
+    // alive (even running its event loop) at this point. Clearing here
+    // would let closeEvent accept while the thread lives. Ownership moves
+    // to onThreadFinished, which is the only place thread_ becomes null.
     lastOutput_ = outputPath;
     setRunning(false);
     progressBar_->setValue(ok ? 100 : 0);
@@ -286,6 +300,28 @@ void MainWindow::onFinished(bool ok, const QString& message, const QString& outp
             previewLabel_->setText(QStringLiteral("Video saved. Open output to view."));
         }
     }
+}
+
+void MainWindow::onThreadFinished() {
+    // The only place thread_ becomes null: the QThread object has emitted
+    // finished, so no worker code can still be running on it. sender() is
+    // checked so a stale signal from a previous job can never clear (or
+    // close over) a newer thread object.
+    auto* s = qobject_cast<QThread*>(sender());
+    if (s && s == thread_) thread_ = nullptr;
+    if (closing_ && !thread_) close();
+}
+
+void MainWindow::setInputForTest(const QString& p) {
+    inputEdit_->setText(p);
+}
+
+void MainWindow::setOutputForTest(const QString& p) {
+    outputEdit_->setText(p);
+}
+
+QString MainWindow::statusTextForTest() const {
+    return statusLabel_->text();
 }
 
 void MainWindow::openOutput() {

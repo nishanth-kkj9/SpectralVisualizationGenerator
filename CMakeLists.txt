@@ -100,6 +100,37 @@ if(Qt6_FOUND)
         WIN32_EXECUTABLE ON
     )
     install(TARGETS spectra_gui RUNTIME DESTINATION bin)
+
+    # Phase 5 correction — headless GUI lifecycle test: drives the real
+    # MainWindow/worker offscreen (QT_QPA_PLATFORM set in-test). Console
+    # subsystem (not WIN32) so CTest captures its output.
+    add_executable(test_gui_lifecycle
+        tests/gui/test_gui_lifecycle.cpp
+        apps/spectrascope/main_window.cpp
+        apps/spectrascope/worker.cpp
+    )
+    target_include_directories(test_gui_lifecycle PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/media
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/rendering
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/spectral
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/encoding
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/pipeline
+        ${CMAKE_CURRENT_SOURCE_DIR}/apps/spectrascope
+    )
+    target_compile_definitions(test_gui_lifecycle PRIVATE NOMINMAX)
+    target_link_libraries(test_gui_lifecycle PRIVATE SpectralCore Qt6::Widgets)
+    # Offscreen platform plugin location (compiled in; the test sets
+    # QT_QPA_PLATFORM_PLUGIN_PATH itself so direct runs work too).
+    get_filename_component(_qt6_root "${Qt6_DIR}/../.." ABSOLUTE)
+    target_compile_definitions(test_gui_lifecycle PRIVATE
+        GUI_QPA_PLUGIN_PATH="${_qt6_root}/Qt6/plugins/platforms")
+    set_target_properties(test_gui_lifecycle PROPERTIES
+        CXX_VISIBILITY_PRESET "hidden"
+        CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
+        WIN32_EXECUTABLE OFF
+    )
+    add_test(NAME gui_lifecycle COMMAND test_gui_lifecycle)
 endif()
 
 enable_testing()
