@@ -171,6 +171,7 @@ add_executable(spectral_benchmarks
     src/benchmarks/bench_video_rendering.cpp
     src/benchmarks/bench_backend.cpp
     src/benchmarks/bench_gpu_render.cpp
+    src/benchmarks/bench_streaming_analysis.cpp
 )
 target_include_directories(spectral_benchmarks PRIVATE
     ${CMAKE_SOURCE_DIR}/src/core
@@ -699,6 +700,17 @@ set_target_properties(test_cancellation PROPERTIES
     WIN32_EXECUTABLE OFF
 )
 add_test(NAME cancellation COMMAND test_cancellation $<TARGET_FILE:spectragen>)
+
+add_executable(test_streaming
+    tests/cli/test_streaming.cpp
+)
+target_link_libraries(test_streaming PRIVATE SpectralCore)
+set_target_properties(test_streaming PROPERTIES
+    CXX_VISIBILITY_PRESET "hidden"
+    CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
+    WIN32_EXECUTABLE OFF
+)
+add_test(NAME streaming COMMAND test_streaming)
 
 add_executable(test_reproducibility
     tests/cli/test_reproducibility.cpp

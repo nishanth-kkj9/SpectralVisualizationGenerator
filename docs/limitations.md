@@ -7,10 +7,11 @@
   stripped PATH only; first install on a fresh machine is a pilot run.
 - **No installer**: portable ZIP + script only; no Inno/NSIS installer yet.
 - **GPU FFT absent**: `gpu_backend` is a stub; GPU covers spectrogram rendering only.
-- **32-bit float DSP** throughout; very long files need proportional RAM
-  (decoder streams in bounded chunks, but the pipeline still accumulates
-  the full mono signal before STFT — see `docs/media-ingestion.md`;
-  OOM fails as analysis error).
+- **32-bit float DSP** throughout; raw input audio is streamed with bounded
+  memory (~2·fft + one decoder chunk live), but the `SpectralDataset`
+  itself still grows with the number of spectral frames, so very long
+  files need proportional RAM for the dataset — see
+  `docs/media-ingestion.md` (OOM fails as analysis error).
 - **Legal**: Qt license selection and FFmpeg bundling rules unresolved —
   see `docs/licensing.md`. Do not redistribute Qt DLLs or GPL FFmpeg builds
   without completing that review.

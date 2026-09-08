@@ -20,3 +20,16 @@ Measured 2026-09-06 (quick mode, 60 s inputs):
 
 GPU wins grow with resolution; at small sizes transfer overhead dominates.
 No performance numbers beyond these measured results are claimed.
+
+Streaming analysis (Phase 6), measured 2026-09-09 with
+`spectral_benchmarks --quick --benchmark streaming_analysis`
+(60 s inputs, single iteration per cell, same machine class):
+
+| Case | audio throughput | peak RSS | peak live raw-audio buffer |
+|------|-----------------|----------|---------------------------|
+| 44.1 kHz, fft 2048–8192 | ~10–13 MB/s | ~43–47 MB | 24–48 KiB |
+| 96 kHz, fft 2048–8192 | ~12–15 MB/s | ~85 MB | 24–48 KiB |
+
+Peak RSS grows with sample rate because the `SpectralDataset` holds more
+spectral frames for the same duration; the raw-audio working set stays at
+tens of KiB regardless of duration.

@@ -17,6 +17,7 @@ bench::Result bench_media_decode(int sample_rate, int fft_size, int duration_sec
 bench::Result bench_video_rendering(int sample_rate, int fft_size, int duration_sec);
 bench::Result bench_backend(int sample_rate, int fft_size, int duration_sec);
 bench::Result bench_gpu_render(int sample_rate, int fft_size, int duration_sec);
+bench::Result bench_streaming_analysis(int sample_rate, int fft_size, int duration_sec);
 
 static void print_usage() {
     printf("Usage: spectral_benchmarks [OPTIONS]\n\n");
@@ -99,6 +100,7 @@ int main(int argc, char* argv[]) {
                 run_if("fft", [&]() { return bench_fft(sr, fs, dur); });
                 run_if("stft", [&]() { return bench_stft(sr, fs, dur); });
                 run_if("dataset_serialization", [&]() { return bench_dataset_serialization(sr, fs, dur); });
+                run_if("streaming_analysis", [&]() { return bench_streaming_analysis(sr, fs, dur); });
             }
         }
         // Resolution-dependent benchmarks (fixed fft_size=4096, duration=60s)

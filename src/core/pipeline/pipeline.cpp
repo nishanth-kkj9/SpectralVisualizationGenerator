@@ -8,9 +8,11 @@
 #include "output_files.h"
 #include "png_encoder.h"
 #include "spectral_dataset.h"
+#include "streaming_analyzer.h"
 #include "video_renderer.h"
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <complex>
 #include <filesystem>
@@ -180,8 +182,8 @@ ProjectConfig make_project_config(const GenerateConfig& cfg, const DecodedMedia&
 }
 
 Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
-                         std::vector<float>& samples_out, ProgressFn progress,
-                         const std::atomic<bool>* cancel) {
+                         ProgressFn progress, const std::atomic<bool>* cancel,
+                         size_t decode_chunk_frames, AnalyzeStats* stats) {
     GenerateConfig cfg = cfg_in;
     const std::string cfg_err = validate_config(cfg);
     if (!cfg_err.empty())
@@ -191,7 +193,9 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
     report(progress, 0.0f, "decode");
     MediaDecoder decoder;
     decoder.set_cancel(cancel);
-    if (!decoder.open(cfg.input_path)) {
+    MediaDecoder::DecodeOptions dopts;
+    if (decode_chunk_frames > 0) dopts.chunk_frames = decode_chunk_frames;
+    if (!decoder.open(cfg.input_path, dopts)) {
         // Truthful classification: the decoder reports WHY open() failed
         // via open_status() instead of collapsing everything into
         // FileNotFound. Message always carries the decoder diagnostic.
@@ -217,49 +221,10 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
         return Error::make(Subsystem::Media, JobError::DecodeError,
                            "media: no valid sample rate from '" + cfg.input_path + "'");
 
-    std::vector<float> audio;
-    AudioFrame frame;
-    while (decoder.read_frame(frame)) {
-        if (frame.num_channels == 1) {
-            audio.insert(audio.end(), frame.samples.begin(), frame.samples.end());
-        } else {
-            size_t n = frame.samples.size() / static_cast<size_t>(frame.num_channels);
-            audio.reserve(audio.size() + n);
-            for (size_t i = 0; i < n; ++i) {
-                float sum = 0.0f;
-                for (int ch = 0; ch < frame.num_channels; ++ch)
-                    sum += frame.samples[i * static_cast<size_t>(frame.num_channels) + ch];
-                audio.push_back(sum / static_cast<float>(frame.num_channels));
-            }
-        }
-    }
-    const bool decode_failed = decoder.failed();
-    const bool decode_cancelled = decoder.cancelled();
-    const std::string decode_err = decoder.last_error();
-    const int native_ch = decoder.num_channels();
-    const std::string codec = decoder.codec_name();
-    const double dec_duration = decoder.duration();
-    decoder.close();
-    // Cancellation is not a failure: the child was terminated on request
-    // and partial audio is discarded (never committed downstream).
-    if (decode_cancelled)
-        return Error::make(Subsystem::Media, JobError::Cancelled,
-                           decode_err.empty() ? "media: decode cancelled for '" +
-                                                    cfg.input_path + "'"
-                                              : decode_err);
-    // A failed decode is never a silent success, even with partial audio.
-    if (decode_failed) {
-        std::string why = decode_err.empty()
-                                ? "media: decode failed for '" + cfg.input_path + "'"
-                                : decode_err;
-        return Error::make(Subsystem::Media, JobError::DecodeError, why);
-    }
-    if (audio.empty())
-        return Error::make(Subsystem::Media, JobError::DecodeError,
-                           "media: decoded 0 audio samples from '" + cfg.input_path + "'");
-
-    // Content identity: one chunked hash per job. Same bytes under any
-    // path hash identically; the hash (not the path) feeds the dataset.
+    // Content identity and the canonical config are resolved BEFORE any
+    // audio flows: hashing reads the file independently, so analysis
+    // parameters (fft/hop/window/gains) are known before the first frame.
+    // Nothing here retains audio.
     std::string content_hash, hash_err;
     uint64_t content_size = 0;
     {
@@ -274,9 +239,9 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
     media.file_hash = content_hash;
     media.file_size_bytes = content_size;
     media.sample_rate = sr;
-    media.num_channels = native_ch;
-    media.duration_seconds = dec_duration;
-    media.codec_name = codec;
+    media.num_channels = decoder.num_channels();
+    media.duration_seconds = decoder.duration();
+    media.codec_name = decoder.codec_name();
     const ProjectConfig pc = make_project_config(cfg, media);
     {
         std::vector<std::string> verr;
@@ -286,7 +251,6 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
     }
 
     // STFT (parameters from the canonical config, not parallel locals).
-    report(progress, 0.1f, "analyze");
     const int fft_n = pc.analysis.fft_size;
     const int hop_n = pc.analysis.hop_size;
     dataset.mutable_frequency_axis() = FrequencyAxis(fft_n, sr);
@@ -296,92 +260,195 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
                            "config: unsupported window type");
     float cg = pc.analysis.window_coherent_gain;
     const int num_bins = fft_n / 2 + 1;
-    const int total = static_cast<int>(audio.size());
-    const int n_frames = (total - fft_n) / hop_n + 1;
-    if (n_frames <= 0)
-        return Error::make(Subsystem::Dsp, JobError::AnalysisError,
-                           "dsp: input too short for fft_size=" + std::to_string(fft_n));
+    // Frame-count estimate for progress (exact at EOF). total_frames() is
+    // duration-derived until a clean EOF; never zero-divided, never >100%.
+    const int64_t est_total = decoder.total_frames();
+    const int est_frames = stft_frame_count(
+        est_total > INT_MAX ? INT_MAX : static_cast<int>(est_total), fft_n, hop_n);
 
+    // Bounded streaming: decoded chunks are mixed to mono, appended to the
+    // overlap buffer, and consumed frame by frame. Only ~2*fft + one chunk
+    // of raw audio is ever live; consumed samples are dropped, never stored.
+    StreamingMonoBuffer stream(fft_n, hop_n);
     int frame_idx = 0;
-    for (int start = 0; start + fft_n <= total; start += hop_n) {
-        // Per-frame cancellation covers STFT and the reassignment work
-        // below (both bounded by one frame's FFTs after the request).
-        if (cancelled(cancel))
-            return Error::make(Subsystem::Pipeline, JobError::Cancelled,
-                               "pipeline: cancelled during analysis");
-        // Authoritative STFT: amplitude-corrected one-sided magnitudes.
-        StftFrame fr;
-        if (!stft_frame(audio.data(), total, start, fft_n, sr, win, cg, fr))
-            return Error::make(Subsystem::Dsp, JobError::AnalysisError,
-                               "dsp: stft frame failed at sample " + std::to_string(start));
-        std::vector<complex_f>& buf = fr.spectrum;
-
-        SpectralFrame sf;
-        sf.frame_index = frame_idx;
-        sf.n_fft = fft_n;
-        sf.window_factor = cg;
-        sf.timestamp = fr.timestamp;
-        sf.magnitudes = std::move(fr.magnitudes);
-        sf.phases = std::move(fr.phases);
-        sf.power = std::move(fr.power);
-
-        float sum_sq = 0.0f, peak = 0.0f, cn = 0.0f, cd = 0.0f;
-        for (int k = 0; k < num_bins; ++k) {
-            float mag = sf.magnitudes[static_cast<size_t>(k)];
-            sum_sq += mag * mag;
-            if (mag > peak) peak = mag;
-            float freq = static_cast<float>(k) * static_cast<float>(sr) / static_cast<float>(fft_n);
-            cn += freq * mag;
-            cd += mag;
+    bool analyze_reported = false;
+    bool decode_eof = false;
+    std::vector<float> mono;
+    AudioFrame frame;
+    auto emit_progress = [&] {
+        if (!analyze_reported) {
+            analyze_reported = true;
+            report(progress, 0.1f, "analyze");
         }
-        sf.rms = std::sqrt(sum_sq / static_cast<float>(num_bins));
-        sf.peak_magnitude = peak;
-        sf.spectral_centroid = (cd > 0.0f) ? cn / cd : 0.0f;
-
-        if (cfg.reassigned) {
-            std::vector<complex_f> X_tau(static_cast<size_t>(fft_n));
-            for (int j = 0; j < fft_n; ++j)
-                X_tau[static_cast<size_t>(j)] = complex_f(
-                    static_cast<float>(j) * win[static_cast<size_t>(j)] *
-                    audio[static_cast<size_t>(start + j)], 0.0f);
-            fft(X_tau);
-            std::vector<float> w_deriv(static_cast<size_t>(fft_n));
-            for (int j = 0; j < fft_n; ++j)
-                w_deriv[static_cast<size_t>(j)] = static_cast<float>(PI) /
-                    static_cast<float>(fft_n - 1) *
-                    std::sin(2.0f * PI * static_cast<float>(j) /
-                             static_cast<float>(fft_n - 1));
-            std::vector<complex_f> X_dg(static_cast<size_t>(fft_n));
-            for (int j = 0; j < fft_n; ++j)
-                X_dg[static_cast<size_t>(j)] = complex_f(
-                    w_deriv[static_cast<size_t>(j)] * audio[static_cast<size_t>(start + j)], 0.0f);
-            fft(X_dg);
-            sf.reassigned_times.resize(static_cast<size_t>(num_bins));
-            sf.reassigned_freqs.resize(static_cast<size_t>(num_bins));
-            for (int k = 0; k < num_bins; ++k) {
-                float re = buf[static_cast<size_t>(k)].real();
-                float im = buf[static_cast<size_t>(k)].imag();
-                float mag_sq = re * re + im * im;
-                if (mag_sq > 1e-12f) {
-                    complex_f conj_X(re, -im);
-                    float corr = (conj_X * X_dg[static_cast<size_t>(k)]).imag();
-                    sf.reassigned_freqs[static_cast<size_t>(k)] =
-                        static_cast<float>(k) * static_cast<float>(sr) / static_cast<float>(fft_n) +
-                        corr / (2.0f * PI * mag_sq) * static_cast<float>(sr);
-                    float dot_tau = (conj_X * X_tau[static_cast<size_t>(k)]).real();
-                    sf.reassigned_times[static_cast<size_t>(k)] = dot_tau / mag_sq / static_cast<float>(sr);
-                } else {
-                    sf.reassigned_freqs[static_cast<size_t>(k)] = 0.0f;
-                    sf.reassigned_times[static_cast<size_t>(k)] = 0.0f;
+        const int denom = est_frames > 0 ? est_frames : 1;
+        const int num = frame_idx < denom ? frame_idx : denom;
+        report(progress, 0.1f + 0.5f * static_cast<float>(num) / denom, "analyze");
+    };
+    while (!decode_eof) {
+        // Fill until the next frame is complete (or decoder EOF).
+        while (!decode_eof) {
+            const int64_t need = stream.next_start() + fft_n - stream.delivered();
+            if (need <= 0) break;
+            if (!decoder.read_frame(frame)) {
+                if (decoder.cancelled()) {
+                    decoder.close();
+                    return Error::make(Subsystem::Media, JobError::Cancelled,
+                                       decoder.last_error().empty()
+                                           ? "media: decode cancelled for '" + cfg.input_path +
+                                                 "'"
+                                           : decoder.last_error());
                 }
+                if (decoder.failed()) {
+                    std::string why = decoder.last_error().empty()
+                                          ? "media: decode failed for '" + cfg.input_path + "'"
+                                          : decoder.last_error();
+                    decoder.close();
+                    return Error::make(Subsystem::Media, JobError::DecodeError, why);
+                }
+                decode_eof = true;  // clean EOF (or empty tail): drain below
+                break;
+            }
+            // Exact mono semantics as the former batch mixer, per chunk:
+            // mono = sum(channels) / channel_count. Per-sample independent,
+            // so chunk boundaries cannot change any value.
+            if (frame.num_channels == 1) {
+                stream.append(frame.samples.data(), frame.samples.size());
+            } else {
+                const size_t n =
+                    frame.samples.size() / static_cast<size_t>(frame.num_channels);
+                mono.resize(n);
+                for (size_t i = 0; i < n; ++i) {
+                    float sum = 0.0f;
+                    for (int ch = 0; ch < frame.num_channels; ++ch)
+                        sum += frame.samples[i * static_cast<size_t>(frame.num_channels) + ch];
+                    mono[i] = sum / static_cast<float>(frame.num_channels);
+                }
+                stream.append(mono.data(), n);
+            }
+            if (est_total > 0) {
+                const int64_t d = stream.delivered() < est_total ? stream.delivered()
+                                                                 : est_total;
+                report(progress, 0.0f + 0.1f * static_cast<float>(d) / est_total,
+                       "decode");
             }
         }
+        // Emit every complete frame (same math as the former whole-audio
+        // loop; span points at the identical N samples).
+        const float* span = nullptr;
+        int64_t abs_start = 0;
+        bool emitted = false;
+        while (stream.pop_frame(span, abs_start)) {
+            emitted = true;
+            if (cancelled(cancel)) {
+                decoder.close();
+                return Error::make(Subsystem::Pipeline, JobError::Cancelled,
+                                   "pipeline: cancelled during analysis");
+            }
+            StftFrame fr;
+            // stft_frame validates start+n_fft <= total: pass the live
+            // window size with the span rebased to zero.
+            if (!stft_frame(span, fft_n, 0, fft_n, sr, win, cg, fr)) {
+                decoder.close();
+                return Error::make(Subsystem::Dsp, JobError::AnalysisError,
+                                   "dsp: stft frame failed at sample " +
+                                       std::to_string(abs_start));
+            }
+            // Buffer-relative start is always 0 here; restore the absolute
+            // timestamp policy (frame start / sample rate, in double).
+            fr.timestamp = static_cast<double>(abs_start) / static_cast<double>(sr);
+            fr.frame_index = frame_idx;
+            std::vector<complex_f>& buf = fr.spectrum;
 
-        dataset.add_frame(sf);
-        ++frame_idx;
-        if ((frame_idx & 31) == 0)
-            report(progress, 0.1f + 0.5f * frame_idx / n_frames, "analyze");
+            SpectralFrame sf;
+            sf.frame_index = frame_idx;
+            sf.n_fft = fft_n;
+            sf.window_factor = cg;
+            sf.timestamp = fr.timestamp;
+            sf.magnitudes = std::move(fr.magnitudes);
+            sf.phases = std::move(fr.phases);
+            sf.power = std::move(fr.power);
+
+            float sum_sq = 0.0f, peak = 0.0f, cn = 0.0f, cd = 0.0f;
+            for (int k = 0; k < num_bins; ++k) {
+                float mag = sf.magnitudes[static_cast<size_t>(k)];
+                sum_sq += mag * mag;
+                if (mag > peak) peak = mag;
+                float freq = static_cast<float>(k) * static_cast<float>(sr) /
+                             static_cast<float>(fft_n);
+                cn += freq * mag;
+                cd += mag;
+            }
+            sf.rms = std::sqrt(sum_sq / static_cast<float>(num_bins));
+            sf.peak_magnitude = peak;
+            sf.spectral_centroid = (cd > 0.0f) ? cn / cd : 0.0f;
+
+            if (cfg.reassigned) {
+                // The full N-sample frame is live in span: identical inputs,
+                // identical order, identical results to the batch path.
+                std::vector<complex_f> X_tau(static_cast<size_t>(fft_n));
+                for (int j = 0; j < fft_n; ++j)
+                    X_tau[static_cast<size_t>(j)] = complex_f(
+                        static_cast<float>(j) * win[static_cast<size_t>(j)] * span[j],
+                        0.0f);
+                fft(X_tau);
+                std::vector<float> w_deriv(static_cast<size_t>(fft_n));
+                for (int j = 0; j < fft_n; ++j)
+                    w_deriv[static_cast<size_t>(j)] =
+                        static_cast<float>(PI) / static_cast<float>(fft_n - 1) *
+                        std::sin(2.0f * PI * static_cast<float>(j) /
+                                 static_cast<float>(fft_n - 1));
+                std::vector<complex_f> X_dg(static_cast<size_t>(fft_n));
+                for (int j = 0; j < fft_n; ++j)
+                    X_dg[static_cast<size_t>(j)] =
+                        complex_f(w_deriv[static_cast<size_t>(j)] * span[j], 0.0f);
+                fft(X_dg);
+                sf.reassigned_times.resize(static_cast<size_t>(num_bins));
+                sf.reassigned_freqs.resize(static_cast<size_t>(num_bins));
+                for (int k = 0; k < num_bins; ++k) {
+                    float re = buf[static_cast<size_t>(k)].real();
+                    float im = buf[static_cast<size_t>(k)].imag();
+                    float mag_sq = re * re + im * im;
+                    if (mag_sq > 1e-12f) {
+                        complex_f conj_X(re, -im);
+                        float corr = (conj_X * X_dg[static_cast<size_t>(k)]).imag();
+                        sf.reassigned_freqs[static_cast<size_t>(k)] =
+                            static_cast<float>(k) * static_cast<float>(sr) /
+                                static_cast<float>(fft_n) +
+                            corr / (2.0f * PI * mag_sq) * static_cast<float>(sr);
+                        float dot_tau =
+                            (conj_X * X_tau[static_cast<size_t>(k)]).real();
+                        sf.reassigned_times[static_cast<size_t>(k)] =
+                            dot_tau / mag_sq / static_cast<float>(sr);
+                    } else {
+                        sf.reassigned_freqs[static_cast<size_t>(k)] = 0.0f;
+                        sf.reassigned_times[static_cast<size_t>(k)] = 0.0f;
+                    }
+                }
+            }
+
+            dataset.add_frame(sf);
+            ++frame_idx;
+            if ((frame_idx & 31) == 0) emit_progress();
+        }
+        if (!emitted) break;  // EOF with fewer than N samples left: same
+                              // floor((total-N)/H)+1 policy as reference
+        emit_progress();
     }
+    const int64_t decoded_total = stream.delivered();
+    const int native_ch = decoder.num_channels();
+    const std::string codec = decoder.codec_name();
+    const double dec_duration = decoder.duration();
+    decoder.close();
+    if (stats) {
+        stats->peak_buffered_samples = stream.peak_buffered();
+        stats->decoded_samples = decoded_total;
+    }
+    if (decoded_total == 0)
+        return Error::make(Subsystem::Media, JobError::DecodeError,
+                           "media: decoded 0 audio samples from '" + cfg.input_path + "'");
+    if (frame_idx == 0)
+        return Error::make(Subsystem::Dsp, JobError::AnalysisError,
+                           "dsp: input too short for fft_size=" + std::to_string(fft_n));
 
     // Dataset metadata comes from the canonical config — never from
     // parallel locals. Analysis method/version record the S4 math.
@@ -431,8 +498,71 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
         nm.db_floor = pc.dynamic_range.db_floor;
         nm.db_reference = pc.dynamic_range.reference_amplitude;
     }
-    samples_out = audio;
+    return Error::success();
+}
 
+Error decode_full_mono(const GenerateConfig& cfg_in, std::vector<float>& samples_out,
+                       ProgressFn progress, const std::atomic<bool>* cancel) {
+    GenerateConfig cfg = cfg_in;
+    const std::string cfg_err = validate_config(cfg);
+    if (!cfg_err.empty())
+        return Error::make(Subsystem::Pipeline, JobError::BadConfig, "config: " + cfg_err);
+
+    report(progress, 0.0f, "decode");
+    MediaDecoder decoder;
+    decoder.set_cancel(cancel);
+    if (!decoder.open(cfg.input_path)) {
+        std::string why = decoder.last_error();
+        if (why.empty()) why = "media: cannot open '" + cfg.input_path + "'";
+        switch (decoder.open_status()) {
+            case OpenStatus::MissingInput:
+                return Error::make(Subsystem::Media, JobError::FileNotFound, why);
+            case OpenStatus::ToolMissing:
+            case OpenStatus::DecoderStartFailed:
+                return Error::make(Subsystem::Media, JobError::DependencyMissing, why);
+            case OpenStatus::ProbeFailed:
+                return Error::make(Subsystem::Media, JobError::ProbeFailed, why);
+            case OpenStatus::NoAudioStream:
+                return Error::make(Subsystem::Media, JobError::NoAudioStream, why);
+            case OpenStatus::Ok:
+                break;
+        }
+        return Error::make(Subsystem::Media, JobError::DecodeError, why);
+    }
+    samples_out.clear();
+    AudioFrame frame;
+    while (decoder.read_frame(frame)) {
+        if (frame.num_channels == 1) {
+            samples_out.insert(samples_out.end(), frame.samples.begin(),
+                               frame.samples.end());
+        } else {
+            const size_t n =
+                frame.samples.size() / static_cast<size_t>(frame.num_channels);
+            samples_out.reserve(samples_out.size() + n);
+            for (size_t i = 0; i < n; ++i) {
+                float sum = 0.0f;
+                for (int ch = 0; ch < frame.num_channels; ++ch)
+                    sum += frame.samples[i * static_cast<size_t>(frame.num_channels) + ch];
+                samples_out.push_back(sum / static_cast<float>(frame.num_channels));
+            }
+        }
+    }
+    const bool failed = decoder.failed();
+    const bool was_cancelled = decoder.cancelled();
+    std::string derr = decoder.last_error();
+    decoder.close();
+    if (was_cancelled)
+        return Error::make(Subsystem::Media, JobError::Cancelled,
+                           derr.empty() ? "media: decode cancelled for '" + cfg.input_path +
+                                              "'"
+                                        : derr);
+    if (failed)
+        return Error::make(Subsystem::Media, JobError::DecodeError,
+                           derr.empty() ? "media: decode failed for '" + cfg.input_path + "'"
+                                        : derr);
+    if (samples_out.empty())
+        return Error::make(Subsystem::Media, JobError::DecodeError,
+                           "media: decoded 0 audio samples from '" + cfg.input_path + "'");
     return Error::success();
 }
 
@@ -567,8 +697,7 @@ Error run_job(const GenerateConfig& cfg, ProgressFn progress,
                  const std::atomic<bool>* cancel) {
     try {
         SpectralDataset dataset;
-        std::vector<float> samples;
-        Error err = analyze_dataset(cfg, dataset, samples, progress, cancel);
+        Error err = analyze_dataset(cfg, dataset, progress, cancel);
         if (!err.ok()) return err;
         if (cancelled(cancel))
             return Error::make(Subsystem::Pipeline, JobError::Cancelled,

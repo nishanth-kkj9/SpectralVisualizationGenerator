@@ -96,9 +96,8 @@ int main() {
     auto cfg = base_cfg(dir);
     // analyze twice: same config -> same dataset bytes + identity
     Spectral::SpectralDataset d1, d2;
-    std::vector<float> s1, s2;
-    CHECK(Spectral::analyze_dataset(cfg, d1, s1).ok(), "analyze run 1");
-    CHECK(Spectral::analyze_dataset(cfg, d2, s2).ok(), "analyze run 2");
+    CHECK(Spectral::analyze_dataset(cfg, d1).ok(), "analyze run 1");
+    CHECK(Spectral::analyze_dataset(cfg, d2).ok(), "analyze run 2");
     std::vector<uint8_t> b1, b2;
     CHECK(d1.serialize_binary(b1), "serialize 1");
     CHECK(d2.serialize_binary(b2), "serialize 2");

@@ -5,9 +5,10 @@
 `MediaDecoder` spawns FFmpeg once per file and parses its stdout PCM pipe
 in bounded chunks (default 4096 frames). No temporary PCM file, no
 whole-file buffer on the decoder side: live state is one chunk plus one
-64 KiB pipe buffer regardless of source duration. Callers (pipeline,
-benchmarks) still accumulate what they consume — chunked STFT is future
-work; see `docs/limitations.md`.
+64 KiB pipe buffer regardless of source duration. The pipeline consumes
+those chunks through a bounded overlap buffer (`StreamingMonoBuffer`) for
+STFT — the only production full-buffer consumer left is the `--multiband`
+diagnostic path; see `docs/limitations.md`.
 
 ## Tool selection
 
@@ -94,7 +95,13 @@ Exit 0 on success, 1 with diagnostics on failure, 2 on bad usage.
 
 ## Known limits
 
-- Whole-file accumulation still lives in the pipeline (not the decoder).
+- The normal pipeline no longer accumulates whole-file audio: decoded
+  chunks flow through a bounded overlap buffer (`StreamingMonoBuffer`,
+  ~2·fft + one chunk live; measured 24–48 KiB peak for 60 s inputs — see
+  `streaming_analysis` in `docs/benchmark-methodology.md`). The
+  `SpectralDataset` itself still stores one entry per spectral frame, and
+  the `--multiband` diagnostic path remains an explicit full-buffer
+  exception (`decode_full_mono`).
 - `--ext`-style batch flows are unchanged.
 - Video encoding shares `SafeProcess`; codec availability is probed at
   use (unavailable codecs fail `open`, never fake success).

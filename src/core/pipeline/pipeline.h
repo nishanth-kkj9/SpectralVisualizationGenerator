@@ -6,8 +6,10 @@
 #include "error.h"
 #include "project/project_config.h"
 #include "spectral_dataset.h"
+#include "streaming_analyzer.h"
 
 #include <atomic>
+#include <cstddef>
 #include <functional>
 #include <string>
 #include <vector>
@@ -66,15 +68,34 @@ Error run_job(const GenerateConfig& cfg, ProgressFn progress = {},
                  const std::atomic<bool>* cancel = nullptr);
 
 // Stages for callers needing mid-pipeline access (CLI multiband table).
-// analyze_dataset fills dataset + raw mono samples; render_dataset writes output.
-// cancel (may be null) is observed during decode, analysis, rendering and
-// encoding; an observed request aborts promptly with JobError::Cancelled
-// (never a failure code), leaving no partial output (Phase 4 TempGuard).
+// analyze_dataset fills the dataset by STREAMING bounded decoder chunks
+// through an overlap buffer: raw-audio memory stays ~2*fft + one chunk,
+// never the whole file. Optional instrumentation: chunk_frames overrides
+// the decoder chunk size (0 = default; tests use it for boundary checks),
+// stats receives peak buffered samples + decoded count when non-null.
+// cancel (may be null) is observed during decode and per analysis frame;
+// an observed request aborts promptly with JobError::Cancelled (never a
+// failure code), leaving no partial output (Phase 4 TempGuard).
+struct AnalyzeStats {
+    size_t peak_buffered_samples = 0;  // max live raw-audio samples
+    int64_t decoded_samples = 0;       // total mono samples decoded
+};
 Error analyze_dataset(const GenerateConfig& cfg, Spectral::SpectralDataset& dataset,
-                         std::vector<float>& samples_out, ProgressFn progress = {},
-                         const std::atomic<bool>* cancel = nullptr);
+                         ProgressFn progress = {},
+                         const std::atomic<bool>* cancel = nullptr,
+                         size_t decode_chunk_frames = 0,
+                         AnalyzeStats* stats = nullptr);
 Error render_dataset(const GenerateConfig& cfg, const Spectral::SpectralDataset& dataset,
                      const std::atomic<bool>* cancel = nullptr);
+
+// Explicit full-buffer mono decode for the multiband diagnostic path,
+// the ONLY production caller that needs every sample (it re-analyzes the
+// same audio at several FFT sizes). Normal run_job() never calls this.
+// Same error/cancel contract as analyze_dataset; samples_out holds the
+// complete mono signal on success only.
+Error decode_full_mono(const GenerateConfig& cfg, std::vector<float>& samples_out,
+                       ProgressFn progress = {},
+                       const std::atomic<bool>* cancel = nullptr);
 
 // Validate config without running. Returns error string, empty if valid.
 std::string validate_config(const GenerateConfig& cfg);

@@ -491,11 +491,19 @@ int main(int argc, char* argv[]) {
     }
 
     // Multi-band comparison needs mid-pipeline access: analyze, print table, render.
+    // Multiband re-analyzes the same audio at several FFT sizes, so it is
+    // the documented full-buffer exception: one explicit full decode here,
+    // while the dataset itself still comes from the streaming analysis.
     if (cfg.multiband) {
         Spectral::SpectralDataset dataset;
         std::vector<float> samples;
-        Spectral::Error err = Spectral::analyze_dataset(cfg, dataset, samples, progress,
-                                                        &g_cancel);
+        Spectral::Error err = Spectral::decode_full_mono(cfg, samples, progress,
+                                                         &g_cancel);
+        if (!err.ok()) {
+            std::cerr << "\nError: " << err.message << "\n";
+            return to_exit_code(err);
+        }
+        err = Spectral::analyze_dataset(cfg, dataset, progress, &g_cancel);
         std::cerr << "\n";
         if (!err.ok()) {
             std::cerr << "Error: " << err.message << "\n";
