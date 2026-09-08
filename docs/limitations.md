@@ -27,3 +27,8 @@
   a sharing-violation error and the old file is kept.
 - **Single-job runs do not create missing output parents** (batch mode
   does); a missing parent fails at render/encode time with a typed error.
+- **Cancellation latency is bounded, not zero**: decode observes a request
+  within one pipe poll (~5ms); analysis/rendering/video stop at frame/row
+  boundaries; ffprobe and an in-flight GPU dispatch run to completion
+  first (both are short). No GUI test harness exists, so Cancel-button
+  behavior is verified by build plus code review, not by an automated test.

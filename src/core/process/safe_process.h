@@ -70,6 +70,16 @@ public:
     // stdout: bytes read, 0 = EOF, (size_t)-1 = error.
     size_t read_stdout(uint8_t* out, size_t max_size);
 
+    // Cancellable stdout read for long streams (decode). Polls the pipe in
+    // bounded slices so a cancellation request is observed within ~10ms
+    // instead of blocking in ReadFile until the child produces more data.
+    // Returns bytes read (0 = EOF). When cancel is observed the child keeps
+    // running: was_cancelled is set, 0 is returned, and the caller must
+    // treat it as an abort (never as EOF) and terminate via kill().
+    size_t read_stdout_cancelable(uint8_t* out, size_t max_size,
+                                  const std::atomic<bool>* cancel,
+                                  bool& was_cancelled);
+
     // stderr drained during run; full text stays available after wait()
     // and cleanup(), until the next spawn().
     std::string stderr_text();

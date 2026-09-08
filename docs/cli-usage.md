@@ -13,7 +13,14 @@ image|video` (auto from extension), `--fps`, `--codec`, `--crf`,
 `--cqt-q`, `--reassigned`, `--multiband`, `--gpu`, `-h`, `-V`.
 
 Exit codes: 0 ok · 1 bad args · 2 file not found · 3 decode error ·
-4 analysis error · 5 render error · 6 missing dependency.
+4 analysis error · 5 render error · 6 missing dependency · 7 cancelled.
+
+Ctrl-C / Ctrl-Break requests cancellation: decode, analysis, rendering,
+and encoding stop at the next stage boundary (pipe polls ~5ms, otherwise
+per chunk/frame/row), the ffmpeg child is terminated, the temp output is
+removed, and any previous valid output is kept. The process exits 7.
+Probe (ffprobe) and an in-flight GPU dispatch are short bounded steps
+that finish first; cancellation is prompt, not instant.
 
 All numeric options are parsed strictly: empty strings, whitespace,
 hex (`0x..`), trailing characters (`1024abc`), and NaN/infinity are

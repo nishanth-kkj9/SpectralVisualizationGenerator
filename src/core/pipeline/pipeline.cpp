@@ -24,6 +24,10 @@ static void report(const ProgressFn& p, float f, const char* stage) {
     if (p) p(f, stage);
 }
 
+// Cancellation probe used by every stage loop (decode chunks, analysis
+// frames, render rows, video frames). Null means "no request channel".
+static bool cancelled(const std::atomic<bool>* c) { return c && c->load(); }
+
 static bool is_supported_window(const std::string& type) {
     return type == "hann" || type == "hamming" || type == "blackman" ||
            type == "rectangular";
@@ -176,7 +180,8 @@ ProjectConfig make_project_config(const GenerateConfig& cfg, const DecodedMedia&
 }
 
 Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
-                         std::vector<float>& samples_out, ProgressFn progress) {
+                         std::vector<float>& samples_out, ProgressFn progress,
+                         const std::atomic<bool>* cancel) {
     GenerateConfig cfg = cfg_in;
     const std::string cfg_err = validate_config(cfg);
     if (!cfg_err.empty())
@@ -185,6 +190,7 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
 
     report(progress, 0.0f, "decode");
     MediaDecoder decoder;
+    decoder.set_cancel(cancel);
     if (!decoder.open(cfg.input_path)) {
         // Truthful classification: the decoder reports WHY open() failed
         // via open_status() instead of collapsing everything into
@@ -228,11 +234,19 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
         }
     }
     const bool decode_failed = decoder.failed();
+    const bool decode_cancelled = decoder.cancelled();
     const std::string decode_err = decoder.last_error();
     const int native_ch = decoder.num_channels();
     const std::string codec = decoder.codec_name();
     const double dec_duration = decoder.duration();
     decoder.close();
+    // Cancellation is not a failure: the child was terminated on request
+    // and partial audio is discarded (never committed downstream).
+    if (decode_cancelled)
+        return Error::make(Subsystem::Media, JobError::Cancelled,
+                           decode_err.empty() ? "media: decode cancelled for '" +
+                                                    cfg.input_path + "'"
+                                              : decode_err);
     // A failed decode is never a silent success, even with partial audio.
     if (decode_failed) {
         std::string why = decode_err.empty()
@@ -290,6 +304,11 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
 
     int frame_idx = 0;
     for (int start = 0; start + fft_n <= total; start += hop_n) {
+        // Per-frame cancellation covers STFT and the reassignment work
+        // below (both bounded by one frame's FFTs after the request).
+        if (cancelled(cancel))
+            return Error::make(Subsystem::Pipeline, JobError::Cancelled,
+                               "pipeline: cancelled during analysis");
         // Authoritative STFT: amplitude-corrected one-sided magnitudes.
         StftFrame fr;
         if (!stft_frame(audio.data(), total, start, fft_n, sr, win, cg, fr))
@@ -419,11 +438,15 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
 
 
 
-Error render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& dataset) {
+Error render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& dataset,
+                     const std::atomic<bool>* cancel) {
     GenerateConfig cfg = cfg_in;
     const std::string render_cfg_err = validate_config(cfg);
     if (!render_cfg_err.empty())
         return Error::make(Subsystem::Pipeline, JobError::BadConfig, "config: " + render_cfg_err);
+    if (cancelled(cancel))
+        return Error::make(Subsystem::Pipeline, JobError::Cancelled,
+                           "pipeline: cancelled before render");
     // Hop defaulting lives in make_project_config (single site).
     // Render configuration flows from the canonical ProjectConfig through
     // the adapter (single mapping). Pipeline execution defaults that the
@@ -464,7 +487,10 @@ Error render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& datase
         vrcfg.db_ceiling = 0.0f;
         vrcfg.window_seconds = cfg.window_seconds;
         VideoRenderer vrend(vrcfg);
-        const VideoRenderError verr = vrend.render(dataset, tmp_path);
+        const VideoRenderError verr = vrend.render(dataset, tmp_path, cancel);
+        if (verr == VideoRenderError::Cancelled)
+            return Error::make(Subsystem::Encode, JobError::Cancelled,
+                               "encode: video render cancelled for '" + cfg.output_path + "'");
         if (verr != VideoRenderError::Ok) {
             // Encoder-open failure with no working ffmpeg is a dependency
             // problem, not a render problem. ffmpeg_available() runs only
@@ -487,14 +513,24 @@ Error render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& datase
         if (cfg.use_gpu) {
             // ponytail: GPU fills RGBAImage; same PNG writer as CPU path
             RGBAImage img;
-            if (renderer.render_gpu(dataset, img) != RenderError::Ok)
+            const RenderError gerr = renderer.render_gpu(dataset, img, cancel);
+            if (gerr == RenderError::Cancelled)
+                return Error::make(Subsystem::Render, JobError::Cancelled,
+                                   "render: spectrogram cancelled for '" + cfg.output_path +
+                                       "'");
+            if (gerr != RenderError::Ok)
                 return Error::make(Subsystem::Render, JobError::RenderError,
                                    "render: spectrogram (GPU) failed for '" + cfg.output_path + "'");
             if (!PNGEncoder::write_rgba(tmp_path, img.width, img.height, img.pixels.data()))
                 return Error::make(Subsystem::Render, JobError::RenderError,
                                    "render: PNG write failed for '" + tmp_path + "'");
         } else {
-            if (renderer.render_to_png(dataset, tmp_path) != RenderError::Ok)
+            const RenderError rerr = renderer.render_to_png(dataset, tmp_path, cancel);
+            if (rerr == RenderError::Cancelled)
+                return Error::make(Subsystem::Render, JobError::Cancelled,
+                                   "render: spectrogram cancelled for '" + cfg.output_path +
+                                       "'");
+            if (rerr != RenderError::Ok)
                 return Error::make(Subsystem::Render, JobError::RenderError,
                                    "render: spectrogram failed for '" + cfg.output_path + "'");
         }
@@ -503,7 +539,11 @@ Error render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& datase
         ProjectConfigAdapter::to_spectrum_config(rpc, sc);
         sc.freq_min_hz = fmin;
         SpectrumRenderer renderer(sc);
-        if (renderer.render_to_png(dataset, tmp_path) != SpectrumError::Ok)
+        const SpectrumError serr = renderer.render_to_png(dataset, tmp_path, cancel);
+        if (serr == SpectrumError::Cancelled)
+            return Error::make(Subsystem::Render, JobError::Cancelled,
+                               "render: spectrum cancelled for '" + cfg.output_path + "'");
+        if (serr != SpectrumError::Ok)
             return Error::make(Subsystem::Render, JobError::RenderError,
                                "render: spectrum failed for '" + cfg.output_path + "'");
     }
@@ -523,19 +563,18 @@ Error render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& datase
     return Error::success();
 }
 
-static bool cancelled(const std::atomic<bool>* c) { return c && c->load(); }
-
 Error run_job(const GenerateConfig& cfg, ProgressFn progress,
                  const std::atomic<bool>* cancel) {
     try {
         SpectralDataset dataset;
         std::vector<float> samples;
-        Error err = analyze_dataset(cfg, dataset, samples, progress);
+        Error err = analyze_dataset(cfg, dataset, samples, progress, cancel);
         if (!err.ok()) return err;
         if (cancelled(cancel))
-            return Error::make(Subsystem::Pipeline, JobError::AnalysisError, "pipeline: cancelled");
+            return Error::make(Subsystem::Pipeline, JobError::Cancelled,
+                               "pipeline: cancelled before render");
         report(progress, 0.65f, "render");
-        err = render_dataset(cfg, dataset);
+        err = render_dataset(cfg, dataset, cancel);
         if (err != JobError::Ok) return err;
         report(progress, 1.0f, "done");
         return Error::success();

@@ -214,7 +214,8 @@ inline float lerp(float a, float b, float t) {
 // Render
 // ============================================================================
 RenderError SpectrogramRenderer::render(const SpectralDataset& dataset,
-                                        RGBAImage& out) const {
+                                        RGBAImage& out,
+                                        const std::atomic<bool>* cancel) const {
     out.clear();
 
     if (cfg_.width <= 0 || cfg_.height <= 0) return RenderError::InvalidDimensions;
@@ -275,6 +276,10 @@ RenderError SpectrogramRenderer::render(const SpectralDataset& dataset,
             int fi_hi = std::min(fi_lo + frames_per, Nf);
             threads.emplace_back([&, fi_lo, fi_hi]() {
                 for (int fi = fi_lo; fi < fi_hi; ++fi) {
+                    // Row/frame-boundary cancellation: threads finish the
+                    // current frame, then exit; the partial image is
+                    // discarded after the join below.
+                    if (cancel && cancel->load(std::memory_order_acquire)) break;
                     const auto& f0 = dataset.frame(fi);
                     const auto* f1_ptr = (fi + 1 < Nf) ? &dataset.frame(fi + 1) : nullptr;
                     const double t0 = f0.timestamp;
@@ -348,6 +353,7 @@ RenderError SpectrogramRenderer::render(const SpectralDataset& dataset,
             int y_hi = std::min(y_lo + rows_per, H);
             threads.emplace_back([&, y_lo, y_hi]() {
                 for (int y = y_lo; y < y_hi; ++y) {
+                    if (cancel && cancel->load(std::memory_order_acquire)) break;
                     const double low_frac = 1.0 - static_cast<double>(y) / (H - 1);
                     float freq = unit_to_hz(static_cast<float>(low_frac),
                                             static_cast<int>(cfg_.freq_scale),
@@ -409,13 +415,18 @@ RenderError SpectrogramRenderer::render(const SpectralDataset& dataset,
         }
         for (auto& th : threads) th.join();
     }
+    if (cancel && cancel->load(std::memory_order_acquire)) {
+        out.clear();
+        return RenderError::Cancelled;
+    }
     return RenderError::Ok;
 }
 
 RenderError SpectrogramRenderer::render_to_png(const SpectralDataset& dataset,
-                                               const std::string& png_path) const {
+                                               const std::string& png_path,
+                                               const std::atomic<bool>* cancel) const {
     RGBAImage img;
-    RenderError err = render(dataset, img);
+    RenderError err = render(dataset, img, cancel);
     if (err != RenderError::Ok) return err;
     if (!PNGEncoder::write_rgba(png_path, img.width, img.height, img.pixels.data())) {
         return RenderError::InvalidDimensions;
@@ -424,17 +435,26 @@ RenderError SpectrogramRenderer::render_to_png(const SpectralDataset& dataset,
 }
 
 RenderError SpectrogramRenderer::render_gpu(const SpectralDataset& dataset,
-                                            RGBAImage& out) const {
+                                            RGBAImage& out,
+                                            const std::atomic<bool>* cancel) const {
 #ifdef _WIN32
+    if (cancel && cancel->load(std::memory_order_acquire)) {
+        out.clear();
+        return RenderError::Cancelled;
+    }
     // ponytail: static context — device init once, reused across renders
     static D3D11Context ctx;
     static GpuSpectrogram gpu(ctx);
-    if (!gpu.is_available()) return render(dataset, out);  // CPU fallback
+    if (!gpu.is_available()) return render(dataset, out, cancel);  // CPU fallback
     RenderError err = gpu.render(dataset, cfg_, out);
-    if (err != RenderError::Ok) return render(dataset, out);  // GPU fail → CPU
+    if (err != RenderError::Ok) return render(dataset, out, cancel);  // GPU fail → CPU
+    if (cancel && cancel->load(std::memory_order_acquire)) {
+        out.clear();
+        return RenderError::Cancelled;
+    }
     return RenderError::Ok;
 #else
-    return render(dataset, out);
+    return render(dataset, out, cancel);
 #endif
 }
 

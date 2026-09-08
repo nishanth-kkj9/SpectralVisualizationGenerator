@@ -55,7 +55,9 @@ struct GenerateConfig {
 
 // Full pipeline: decode -> analyze -> render image or video.
 // Returns Ok on success. Progress may be empty (no-op).
-// Cancel is polled between stages; a set flag aborts before render.
+// Cancel is observed during every stage (decode chunks, analysis frames,
+// render rows, video frames); a set flag aborts promptly with
+// JobError::Cancelled, never a failure code.
 // New bytes go only to a uniquely named temp file beside the destination;
 // success replaces the destination via the OS replace semantic (never
 // delete-then-rename), so an interrupted or failed job never leaves a
@@ -65,9 +67,14 @@ Error run_job(const GenerateConfig& cfg, ProgressFn progress = {},
 
 // Stages for callers needing mid-pipeline access (CLI multiband table).
 // analyze_dataset fills dataset + raw mono samples; render_dataset writes output.
+// cancel (may be null) is observed during decode, analysis, rendering and
+// encoding; an observed request aborts promptly with JobError::Cancelled
+// (never a failure code), leaving no partial output (Phase 4 TempGuard).
 Error analyze_dataset(const GenerateConfig& cfg, Spectral::SpectralDataset& dataset,
-                         std::vector<float>& samples_out, ProgressFn progress = {});
-Error render_dataset(const GenerateConfig& cfg, const Spectral::SpectralDataset& dataset);
+                         std::vector<float>& samples_out, ProgressFn progress = {},
+                         const std::atomic<bool>* cancel = nullptr);
+Error render_dataset(const GenerateConfig& cfg, const Spectral::SpectralDataset& dataset,
+                     const std::atomic<bool>* cancel = nullptr);
 
 // Validate config without running. Returns error string, empty if valid.
 std::string validate_config(const GenerateConfig& cfg);

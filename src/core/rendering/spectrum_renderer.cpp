@@ -404,7 +404,8 @@ int SpectrumRenderer::freq_to_x(float freq_hz, float fmin, float fmax,
 // ============================================================================
 
 SpectrumError SpectrumRenderer::render(const SpectralDataset& dataset,
-                                       RGBAImage& out) const {
+                                       RGBAImage& out,
+                                       const std::atomic<bool>* cancel) const {
     out.clear();
     if (cfg_.width <= 0 || cfg_.height <= 0) return SpectrumError::InvalidDimensions;
     if (dataset.frame_count() <= 0 || dataset.num_frequency_bins() <= 0) {
@@ -424,6 +425,10 @@ SpectrumError SpectrumRenderer::render(const SpectralDataset& dataset,
 
     // Background
     for (int y = 0; y < H; ++y) {
+        if (cancel && cancel->load(std::memory_order_acquire)) {
+            out.clear();
+            return SpectrumError::Cancelled;
+        }
         for (int x = 0; x < W; ++x) {
             uint8_t* p = &out.pixels[(static_cast<size_t>(y) * W + x) * 4];
             p[0] = cfg_.bg_r; p[1] = cfg_.bg_g; p[2] = cfg_.bg_b; p[3] = cfg_.bg_a;
@@ -508,6 +513,10 @@ SpectrumError SpectrumRenderer::render(const SpectralDataset& dataset,
 
     // Draw polyline with thickness
     for (int k = 1; k < nb; ++k) {
+        if ((k & 255) == 0 && cancel && cancel->load(std::memory_order_acquire)) {
+            out.clear();
+            return SpectrumError::Cancelled;
+        }
         const int t = std::max(1, cfg_.line_thickness);
         for (int dx = 0; dx < t; ++dx) {
             // Color: gradient by y (top of plot -> high values)
@@ -557,9 +566,10 @@ SpectrumError SpectrumRenderer::render(const SpectralDataset& dataset,
 }
 
 SpectrumError SpectrumRenderer::render_to_png(const SpectralDataset& dataset,
-                                               const std::string& png_path) const {
+                                              const std::string& png_path,
+                                              const std::atomic<bool>* cancel) const {
     RGBAImage img;
-    SpectrumError err = render(dataset, img);
+    SpectrumError err = render(dataset, img, cancel);
     if (err != SpectrumError::Ok) return err;
     if (!PNGEncoder::write_rgba(png_path, img.width, img.height, img.pixels.data())) {
         return SpectrumError::InvalidDimensions;

@@ -249,20 +249,41 @@ void MediaDecoder::close() {
     eof_seen_ = false;
     eof_clean_ = false;
     failed_ = false;
+    cancelled_ = false;
     last_error_.clear();
     staging_.clear();
 }
 
 bool MediaDecoder::read_frame(AudioFrame& frame) {
     frame = AudioFrame{};
-    if (!format_open_ || failed_ || eof_seen_) return false;
+    if (!format_open_ || failed_ || eof_seen_ || cancelled_) return false;
+    // A preset request aborts before touching the pipe: no chunk is
+    // delivered, the child is terminated, callers see cancelled().
+    if (cancel_ && cancel_->load(std::memory_order_acquire)) {
+        proc_.kill();
+        cancelled_ = true;
+        last_error_ = "media: decode cancelled for '" + filepath_ + "'";
+        return false;
+    }
 
     const size_t want_frames = opts_.chunk_frames;
     const size_t want_bytes = want_frames * static_cast<size_t>(channel_count_) * 2;
     std::vector<uint8_t> buf(65536);
     bool eof = false;
     while (staging_.size() < want_bytes && !eof) {
-        size_t n = proc_.read_stdout(buf.data(), buf.size());
+        bool was_cancelled = false;
+        size_t n = proc_.read_stdout_cancelable(buf.data(), buf.size(), cancel_,
+                                               was_cancelled);
+        if (was_cancelled) {
+            // The child keeps running after a poll abort: terminate it so
+            // no ffmpeg survives cancellation, then report. Staged bytes
+            // are discarded; delivered chunks stay valid.
+            proc_.kill();
+            staging_.clear();
+            cancelled_ = true;
+            last_error_ = "media: decode cancelled for '" + filepath_ + "'";
+            return false;
+        }
         if (n == static_cast<size_t>(-1)) {
             failed_ = true;
             last_error_ = "media: decode pipe error for '" + filepath_ + "'";

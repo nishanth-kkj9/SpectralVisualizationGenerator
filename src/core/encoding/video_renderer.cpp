@@ -103,7 +103,8 @@ VideoRenderError VideoRenderer::render_frame(const SpectralDataset& dataset,
 }
 
 VideoRenderError VideoRenderer::render(const SpectralDataset& dataset,
-                                       const std::string& output_path) const {
+                                       const std::string& output_path,
+                                       const std::atomic<bool>* cancel) const {
     if (dataset.frame_count() == 0) return VideoRenderError::EmptyDataset;
 
     // Open encoder
@@ -125,6 +126,13 @@ VideoRenderError VideoRenderer::render(const SpectralDataset& dataset,
 
     RGBAImage frame_img;
     for (int64_t f = 0; f < total_frames; ++f) {
+        // Frame-boundary cancellation: stop generating frames, terminate
+        // the encoder child (it would otherwise wait on stdin forever),
+        // and report. The pipeline removes the partial temp output.
+        if (cancel && cancel->load(std::memory_order_acquire)) {
+            encoder.abort();
+            return VideoRenderError::Cancelled;
+        }
         double time_sec = f * frame_dur;
 
         auto err = render_frame(dataset, time_sec, frame_img);

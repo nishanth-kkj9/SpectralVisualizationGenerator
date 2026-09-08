@@ -103,10 +103,16 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     outRow->addWidget(outBtn);
     layout->addLayout(outRow);
 
-    // 5. Generate
+    // 5. Generate + Cancel (side by side; Cancel only while running)
+    auto* runRow = new QHBoxLayout();
     generateBtn_ = new QPushButton(QStringLiteral("Generate"), this);
     connect(generateBtn_, &QPushButton::clicked, this, &MainWindow::generate);
-    layout->addWidget(generateBtn_);
+    runRow->addWidget(generateBtn_, 1);
+    cancelBtn_ = new QPushButton(QStringLiteral("Cancel"), this);
+    cancelBtn_->setEnabled(false);
+    connect(cancelBtn_, &QPushButton::clicked, this, &MainWindow::cancelJob);
+    runRow->addWidget(cancelBtn_);
+    layout->addLayout(runRow);
 
     // 6. Progress
     progressBar_ = new QProgressBar(this);
@@ -192,6 +198,7 @@ void MainWindow::applyPreset(int index) {
 
 void MainWindow::setRunning(bool running) {
     generateBtn_->setEnabled(!running);
+    cancelBtn_->setEnabled(running);
     openBtn_->setEnabled(!running && !lastOutput_.isEmpty());
     if (running) progressBar_->setValue(0);
 }
@@ -224,9 +231,10 @@ void MainWindow::generate() {
 
     setRunning(true);
     statusLabel_->setText(QStringLiteral("Starting…"));
+    cancel_.store(false);
 
     thread_ = new QThread(this);
-    auto* worker = new Worker(std::move(cfg));
+    auto* worker = new Worker(std::move(cfg), &cancel_);
     worker->moveToThread(thread_);
     connect(thread_, &QThread::started, worker, &Worker::run);
     connect(worker, &Worker::progress, this, &MainWindow::onProgress);
@@ -235,6 +243,26 @@ void MainWindow::generate() {
     connect(thread_, &QThread::finished, worker, &QObject::deleteLater);
     connect(thread_, &QThread::finished, thread_, &QObject::deleteLater);
     thread_->start();
+}
+
+void MainWindow::cancelJob() {
+    // Request only: the worker observes the flag at the next stage
+    // boundary, cleans up (temp removed, child terminated), and reports.
+    // The button disables immediately so a second click cannot re-arm.
+    if (!thread_) return;
+    cancel_.store(true);
+    cancelBtn_->setEnabled(false);
+    statusLabel_->setText(QStringLiteral("Cancelling…"));
+}
+
+void MainWindow::closeEvent(QCloseEvent* event) {
+    if (thread_) {
+        cancel_.store(true);
+        // The worker aborts promptly at stage boundaries; wait for its
+        // cleanup (temp removal, child termination) before tearing down.
+        thread_->wait(30000);
+    }
+    QMainWindow::closeEvent(event);
 }
 
 void MainWindow::onProgress(int percent, const QString& stage) {

@@ -6,6 +6,7 @@
 
 #include "spectral_dataset.h"
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -80,6 +81,7 @@ enum class RenderError {
     EmptyDataset,
     InvalidDimensions,
     InvalidFrequencyRange,
+    Cancelled,  // caller-requested cancellation; out is cleared
 };
 
 // ============================================================================
@@ -92,15 +94,22 @@ public:
 
     // Render synchronously. Returns Ok on success.
     // The output image is filled only on Ok. On any error, out is cleared.
-    RenderError render(const SpectralDataset& dataset, RGBAImage& out) const;
+    // cancel (may be null) is observed at row/frame boundaries; on
+    // Cancelled the threads finish their current row and out is cleared.
+    RenderError render(const SpectralDataset& dataset, RGBAImage& out,
+                       const std::atomic<bool>* cancel = nullptr) const;
 
     // Convenience: render + write PNG. Equivalent to render() then write_png().
     RenderError render_to_png(const SpectralDataset& dataset,
-                              const std::string& png_path) const;
+                              const std::string& png_path,
+                              const std::atomic<bool>* cancel = nullptr) const;
 
     // Phase 17 — GPU path via D3D11 compute shaders. Falls back to CPU render()
     // when GPU is unavailable. Output layout identical to render().
-    RenderError render_gpu(const SpectralDataset& dataset, RGBAImage& out) const;
+    // cancel is checked before dispatch; an in-flight GPU dispatch itself
+    // is not preemptible (bounded by one dispatch), then CPU path checks apply.
+    RenderError render_gpu(const SpectralDataset& dataset, RGBAImage& out,
+                           const std::atomic<bool>* cancel = nullptr) const;
 
     // Accessors
     const SpectrogramConfig& config() const { return cfg_; }

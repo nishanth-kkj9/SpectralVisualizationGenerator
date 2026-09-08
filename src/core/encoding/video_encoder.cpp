@@ -102,4 +102,12 @@ VideoEncoderError VideoEncoder::close() {
     return VideoEncoderError::Ok;
 }
 
+void VideoEncoder::abort() {
+    // kill() terminates the child and joins the drain thread (Phase 1
+    // ordering preserved); cleanup() then closes pipes. Both idempotent,
+    // so a later close()/dtor stays safe.
+    proc_.kill();
+    proc_.cleanup();
+}
+
 } // namespace Spectral

@@ -48,6 +48,11 @@ public:
     // Finalize and close the ffmpeg process.
     VideoEncoderError close();
 
+    // Abort an in-flight encode: terminate the ffmpeg child (no waiting
+    // for it to finish the file), join the drain thread, release pipes.
+    // The partial output is left for the caller to remove. Idempotent.
+    void abort();
+
     bool is_open() const;
 
     // True when the last open() failed because ffmpeg could not start.

@@ -8,6 +8,7 @@
 #include "spectrogram_renderer.h"
 #include "video_encoder.h"
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 
@@ -34,6 +35,7 @@ enum class VideoRenderError {
     EncoderOpenFailed,
     EncoderWriteFailed,
     EncoderCloseFailed,
+    Cancelled,  // caller-requested cancellation; encoder terminated
 };
 
 class VideoRenderer {
@@ -41,9 +43,13 @@ public:
     VideoRenderer() = default;
     explicit VideoRenderer(const VideoRendererConfig& cfg) : cfg_(cfg) {}
 
-    // Render entire dataset to video file.
+    // Render entire dataset to video file. cancel (may be null) is
+    // observed between frames; on Cancelled the encoder child is
+    // terminated (never left running) and the partial file is untouched
+    // by this layer (the pipeline removes its temp).
     VideoRenderError render(const SpectralDataset& dataset,
-                            const std::string& output_path) const;
+                            const std::string& output_path,
+                            const std::atomic<bool>* cancel = nullptr) const;
 
     // Render a single frame at the given time. Returns RGBA pixels.
     // Useful for testing without video encoding.

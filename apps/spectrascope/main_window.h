@@ -5,6 +5,8 @@
 
 #include <QMainWindow>
 
+#include <atomic>
+
 class QComboBox;
 class QCheckBox;
 class QLineEdit;
@@ -22,12 +24,16 @@ public:
 protected:
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dropEvent(QDropEvent* event) override;
+    // A close during an active job requests cancellation and waits for the
+    // worker to finish cleanup, so no thread outlives the window.
+    void closeEvent(QCloseEvent* event) override;
 
 private slots:
     void browseInput();
     void browseOutput();
     void applyPreset(int index);
     void generate();
+    void cancelJob();
     void onProgress(int percent, const QString& stage);
     void onFinished(bool ok, const QString& message, const QString& outputPath);
     void openOutput();
@@ -48,10 +54,14 @@ private:
     QCheckBox* gpuCheck_;
     QCheckBox* reassignCheck_;
     QPushButton* generateBtn_;
+    QPushButton* cancelBtn_;
     QPushButton* openBtn_;
     QProgressBar* progressBar_;
     QLabel* statusLabel_;
     QLabel* previewLabel_;
     QString lastOutput_;
     QThread* thread_ = nullptr;
+    // Cancellation flag: owned here, observed by the worker thread.
+    // Outlives the worker (reset per job, never destroyed mid-job).
+    std::atomic<bool> cancel_{false};
 };

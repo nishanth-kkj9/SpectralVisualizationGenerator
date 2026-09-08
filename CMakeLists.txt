@@ -658,6 +658,17 @@ set_target_properties(test_output_files PROPERTIES
 )
 add_test(NAME output_files COMMAND test_output_files)
 
+add_executable(test_cancellation
+    tests/cli/test_cancellation.cpp
+)
+target_link_libraries(test_cancellation PRIVATE SpectralCore)
+set_target_properties(test_cancellation PROPERTIES
+    CXX_VISIBILITY_PRESET "hidden"
+    CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
+    WIN32_EXECUTABLE OFF
+)
+add_test(NAME cancellation COMMAND test_cancellation $<TARGET_FILE:spectragen>)
+
 add_executable(test_reproducibility
     tests/cli/test_reproducibility.cpp
 )

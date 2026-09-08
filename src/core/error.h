@@ -37,6 +37,7 @@ enum class JobError {
     ProbeFailed = 7,        // ffprobe ran but the file is unreadable
     NoAudioStream = 8,      // valid media, no usable audio stream
     EncodeError = 9,        // video encoder failure (distinct from render)
+    Cancelled = 10,         // caller-requested cancellation (never a failure)
 };
 
 struct Error {
@@ -85,7 +86,8 @@ inline const char* job_error_name(JobError e) noexcept {
         case JobError::DependencyMissing: return "dependency-missing";
         case JobError::ProbeFailed:       return "probe-failed";
         case JobError::NoAudioStream:     return "no-audio-stream";
-        case JobError::EncodeError:       return "encode-error";
+        case JobError::EncodeError: return "encode-error";
+        case JobError::Cancelled:   return "cancelled";
     }
     return "unknown";
 }

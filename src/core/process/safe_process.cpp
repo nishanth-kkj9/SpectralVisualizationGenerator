@@ -300,6 +300,44 @@ size_t SafeProcess::read_stdout(uint8_t* out, size_t max_size) {
     return static_cast<size_t>(r);  // 0 = EOF
 }
 
+size_t SafeProcess::read_stdout_cancelable(uint8_t* out, size_t max_size,
+                                            const std::atomic<bool>* cancel,
+                                            bool& was_cancelled) {
+    was_cancelled = false;
+    if (!child_stdout_ || !out || max_size == 0) return static_cast<size_t>(-1);
+    HANDLE h = static_cast<HANDLE>(child_stdout_);
+    for (;;) {
+        if (cancel && cancel->load(std::memory_order_acquire)) {
+            was_cancelled = true;
+            return 0;
+        }
+        DWORD avail = 0;
+        if (PeekNamedPipe(h, nullptr, 0, nullptr, &avail, nullptr) && avail > 0) {
+            DWORD r = 0;
+            DWORD ask = max_size > (1 << 20) ? (1 << 20) : static_cast<DWORD>(max_size);
+            if (avail < ask) ask = avail;
+            if (!ReadFile(h, out, ask, &r, nullptr)) {
+                if (GetLastError() == ERROR_BROKEN_PIPE) return 0;  // EOF
+                return static_cast<size_t>(-1);
+            }
+            return static_cast<size_t>(r);  // 0 = EOF
+        }
+        if (!running()) {
+            // Child gone: drain whatever remains, then EOF/error.
+            DWORD r = 0;
+            DWORD ask = max_size > (1 << 20) ? (1 << 20) : static_cast<DWORD>(max_size);
+            if (!ReadFile(h, out, ask, &r, nullptr)) {
+                if (GetLastError() == ERROR_BROKEN_PIPE) return 0;  // EOF
+                return static_cast<size_t>(-1);
+            }
+            return static_cast<size_t>(r);
+        }
+        // Child alive but silent (slow decode start): bounded wait, then
+        // re-poll. The cancel check above keeps this responsive.
+        Sleep(5);
+    }
+}
+
 void SafeProcess::drain_stderr() {
     // Snapshot the handle: members are only reassigned after this thread
     // is joined, so the local copy cannot dangle.

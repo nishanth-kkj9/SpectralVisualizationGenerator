@@ -193,7 +193,10 @@ std::vector<FileResult> run_batch(const GenerateConfig& template_cfg,
                         auto t0 = std::chrono::steady_clock::now();
                         Error err = Error::success();
                         try {
-                            err = run_job(cfg);
+                            // The shared batch flag reaches every stage:
+                            // in-flight files abort with Cancelled, queued
+                            // files never start (checked above).
+                            err = run_job(cfg, {}, &cancel);
                         } catch (const std::exception& ex) {
                             err = Error::make(Subsystem::Pipeline, JobError::AnalysisError,
                                               std::string("pipeline: ") + ex.what());

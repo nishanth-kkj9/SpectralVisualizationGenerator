@@ -10,6 +10,10 @@ Thin client over the same pipeline as the CLI. No editor/player features.
    or adjust FFT, window, scale, resolution, dB range manually.
 4. **Output**: file path (auto-suggested next to input).
 5. **Generate**: work runs on a background thread; the window stays responsive.
+   **Cancel** requests cancellation: the worker stops at the next stage
+   boundary, the temp output is removed, a previous valid output is kept,
+   and the status shows "Cancelled" (never a false success). Closing the
+   window mid-job cancels and waits for worker cleanup first.
 6. **Progress**: bar + stage label (`decode → analyze → render/video → done`).
 7. **Result**: PNG preview inline; video shows a saved notice (open externally).
 8. **Open output location**: reveals the folder in Explorer.

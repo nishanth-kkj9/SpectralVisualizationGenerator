@@ -7,10 +7,14 @@
 #include <QObject>
 #include <QString>
 
+#include <atomic>
+
 class Worker : public QObject {
     Q_OBJECT
 public:
-    explicit Worker(Spectral::GenerateConfig cfg, QObject* parent = nullptr);
+    // cancel is not owned; MainWindow keeps it alive longer than the worker.
+    explicit Worker(Spectral::GenerateConfig cfg, const std::atomic<bool>* cancel,
+                    QObject* parent = nullptr);
 
 signals:
     void progress(int percent, const QString& stage);
@@ -21,4 +25,5 @@ public slots:
 
 private:
     Spectral::GenerateConfig cfg_;
+    const std::atomic<bool>* cancel_ = nullptr;
 };

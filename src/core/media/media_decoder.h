@@ -12,6 +12,7 @@
 
 #include "process/safe_process.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -54,6 +55,13 @@ public:
 
     // Next bounded chunk. False at clean EOF or on error (see failed()).
     bool read_frame(AudioFrame& frame);
+
+    // Cancellation: observed from the worker thread that runs read_frame.
+    // Set before/during decoding; read_frame aborts promptly (bounded by
+    // one pipe poll), terminates the ffmpeg child, and reports cancelled().
+    // Cancellation is not a failure: failed() stays false.
+    void set_cancel(const std::atomic<bool>* cancel) { cancel_ = cancel; }
+    bool cancelled() const { return cancelled_; }
 
     // Effective rate: native probe rate, or DecodeOptions::target_rate once open.
     int sample_rate() const { return format_open_ ? effective_rate_ : sample_rate_; }
@@ -106,4 +114,6 @@ private:
     std::vector<uint8_t> staging_;
     int effective_rate_ = 0;
     Spectral::SafeProcess proc_;
+    const std::atomic<bool>* cancel_ = nullptr;  // not owned; may be null
+    bool cancelled_ = false;  // set once when read_frame observes cancel
 };

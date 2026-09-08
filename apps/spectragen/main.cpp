@@ -50,6 +50,7 @@ enum ExitCode : int {
     AnalysisError   = 4,
     RenderError     = 5,
     DependencyError = 6,
+    Cancelled       = 7,  // caller-requested cancellation (Ctrl-C)
 };
 
 // ============================================================================
@@ -421,8 +422,9 @@ static int to_exit_code(const Spectral::Error& e) {
         case Spectral::JobError::AnalysisError:     return ExitCode::AnalysisError;
         case Spectral::JobError::RenderError:       return ExitCode::RenderError;
         case Spectral::JobError::EncodeError:       return ExitCode::RenderError;
-        case Spectral::JobError::BadConfig:         return ExitCode::BadArgs;
-        case Spectral::JobError::DependencyMissing: return ExitCode::DependencyError;
+    case Spectral::JobError::BadConfig:         return ExitCode::BadArgs;
+    case Spectral::JobError::DependencyMissing: return ExitCode::DependencyError;
+    case Spectral::JobError::Cancelled:         return ExitCode::Cancelled;
     }
     return ExitCode::BadArgs;
 }
@@ -492,7 +494,8 @@ int main(int argc, char* argv[]) {
     if (cfg.multiband) {
         Spectral::SpectralDataset dataset;
         std::vector<float> samples;
-        Spectral::Error err = Spectral::analyze_dataset(cfg, dataset, samples, progress);
+        Spectral::Error err = Spectral::analyze_dataset(cfg, dataset, samples, progress,
+                                                        &g_cancel);
         std::cerr << "\n";
         if (!err.ok()) {
             std::cerr << "Error: " << err.message << "\n";
@@ -535,7 +538,7 @@ int main(int argc, char* argv[]) {
                     multi.dataset.frequency_resolution(), multi.compute_ms);
         std::printf("\n");
 
-        Spectral::Error rerr = Spectral::render_dataset(cfg, dataset);
+        Spectral::Error rerr = Spectral::render_dataset(cfg, dataset, &g_cancel);
         rc = to_exit_code(rerr);
         if (rc != ExitCode::OK) {
             std::cerr << "Error: " << rerr.message << "\n";

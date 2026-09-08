@@ -81,6 +81,7 @@ enum class SpectrumError {
     EmptyDataset,
     InvalidDimensions,
     InvalidFrequencyRange,
+    Cancelled,  // caller-requested cancellation; out is cleared
 };
 
 // ============================================================================
@@ -92,11 +93,14 @@ public:
     explicit SpectrumRenderer(const SpectrumConfig& cfg) : cfg_(cfg) {}
 
     // Render synchronously. Returns Ok on success. On any error, out is cleared.
-    SpectrumError render(const SpectralDataset& dataset, RGBAImage& out) const;
+    // cancel (may be null) is observed at row boundaries.
+    SpectrumError render(const SpectralDataset& dataset, RGBAImage& out,
+                         const std::atomic<bool>* cancel = nullptr) const;
 
     // Convenience: render + write PNG.
     SpectrumError render_to_png(const SpectralDataset& dataset,
-                                const std::string& png_path) const;
+                                const std::string& png_path,
+                                const std::atomic<bool>* cancel = nullptr) const;
 
     // Accessors
     const SpectrumConfig& config() const { return cfg_; }
