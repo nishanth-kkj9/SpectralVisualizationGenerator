@@ -37,6 +37,9 @@ struct GenerateConfig {
     int width = 1024;
     int height = 512;
     std::string output_format = "image";  // image | video
+    bool output_format_explicit = false;  // true when user stated the format
+                                          // (CLI --output-format / GUI combo),
+                                          // false when inferred from extension
     int fps = 30;
     std::string video_codec = "libx264";
     int crf = 18;
@@ -53,8 +56,10 @@ struct GenerateConfig {
 // Full pipeline: decode -> analyze -> render image or video.
 // Returns Ok on success. Progress may be empty (no-op).
 // Cancel is polled between stages; a set flag aborts before render.
-// Outputs are written atomically (temp file + rename), so an
-// interrupted job never leaves a partial file at output_path.
+// New bytes go only to a uniquely named temp file beside the destination;
+// success replaces the destination via the OS replace semantic (never
+// delete-then-rename), so an interrupted or failed job never leaves a
+// partial file at output_path and never destroys a previous valid output.
 Error run_job(const GenerateConfig& cfg, ProgressFn progress = {},
                  const std::atomic<bool>* cancel = nullptr);
 

@@ -5,6 +5,7 @@
 #include "media_decoder.h"
 #include "spectrogram_renderer.h"
 #include "spectrum_renderer.h"
+#include "output_files.h"
 #include "png_encoder.h"
 #include "spectral_dataset.h"
 #include "video_renderer.h"
@@ -30,7 +31,12 @@ static bool is_supported_window(const std::string& type) {
 
 std::string validate_config(const GenerateConfig& cfg) {
     if (cfg.input_path.empty()) return "no input file";
-    if (cfg.output_path.empty()) return "no output file";
+    // Output location authority (format/extension contract, directory and
+    // parent sanity). Runs before any decode; never creates or deletes.
+    if (const std::string loc_err = validate_output_location(
+            cfg.output_path, cfg.output_format, cfg.output_format_explicit);
+        !loc_err.empty())
+        return loc_err;
     if (cfg.visualization != "spectrogram" && cfg.visualization != "spectrum")
         return "visualization must be spectrogram or spectrum";
     if (cfg.fft_size < 2 || (cfg.fft_size & (cfg.fft_size - 1)) != 0)
@@ -61,8 +67,6 @@ std::string validate_config(const GenerateConfig& cfg) {
         return "cqt-center must be finite and > 0";
     if (!finite(cfg.cqt_q) || cfg.cqt_q <= 0.0f)
         return "cqt-q must be finite and > 0";
-    if (!finite(cfg.window_seconds) && cfg.output_format == "video")
-        return "duration must be finite";
     if (cfg.width <= 0 || cfg.height <= 0) return "resolution must be positive";
     if (cfg.width > 32768 || cfg.height > 32768)
         return "resolution dimensions must be <= 32768";
@@ -73,13 +77,18 @@ std::string validate_config(const GenerateConfig& cfg) {
         return "resolution pixel count must be <= 268M (8192x32768)";
     if (cfg.output_format != "image" && cfg.output_format != "video")
         return "output-format must be image or video";
+    // Video-only bounds apply to the EFFECTIVE format: an inferred video
+    // (video extension, no explicit format) must satisfy them too.
+    const bool eff_video =
+        effective_output_format(cfg.output_path, cfg.output_format,
+                                cfg.output_format_explicit) == "video";
     if (cfg.max_freq > 0.0f && cfg.min_freq >= cfg.max_freq)
         return "min-frequency must be below max-frequency";
     if (cfg.freq_scale != "linear" && cfg.freq_scale != "log" &&
         cfg.freq_scale != "mel" && cfg.freq_scale != "bark" &&
         cfg.freq_scale != "erb" && cfg.freq_scale != "cqt")
         return "freq-scale must be linear, log, mel, bark, erb, or cqt";
-    if (cfg.output_format == "video") {
+    if (eff_video) {
         // Same bounds the encoder enforces; checked here so API callers
         // fail at validation instead of mid-encode.
         if (cfg.fps <= 0 || cfg.fps > 120) return "fps must be 1..120";
@@ -87,13 +96,6 @@ std::string validate_config(const GenerateConfig& cfg) {
         if (!finite(cfg.window_seconds) || cfg.window_seconds <= 0.0f)
             return "duration must be finite and > 0";
         if (cfg.video_codec.empty()) return "codec must be non-empty";
-    }
-    // Fail before doing work if the output path is an existing directory.
-    // std::filesystem handles spaces/Unicode; nothing is created or run.
-    {
-        std::error_code ec;
-        if (fs::is_directory(cfg.output_path, ec) && !ec)
-            return "output path is a directory, file required";
     }
     return "";
 }
@@ -415,28 +417,7 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
     return Error::success();
 }
 
-// ponytail: temp + rename so interrupted jobs never leave partial outputs.
-// Overwrite = remove + rename (fs::rename fails on existing Windows targets).
-static bool commit_file(const std::string& tmp, const std::string& dst) {
-    std::error_code ec;
-    // ponytail: never touch an existing directory — fail clearly instead
-    if (fs::is_directory(dst, ec) && !ec) {
-        fs::remove(tmp, ec);
-        return false;
-    }
-    fs::remove(dst, ec);
-    fs::rename(tmp, dst, ec);
-    if (ec) fs::remove(tmp, ec);
-    return !ec;
-}
 
-// ponytail: keep the real extension — ffmpeg sniffs format from it
-static std::string tmp_for(const std::string& dst) {
-    fs::path p(dst);
-    fs::path tmp = p;
-    tmp.replace_filename(p.stem().string() + ".part" + p.extension().string());
-    return tmp.string();
-}
 
 Error render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& dataset) {
     GenerateConfig cfg = cfg_in;
@@ -459,8 +440,17 @@ Error render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& datase
     rmedia.codec_name = dataset.source_metadata().codec_name;
     const ProjectConfig rpc = make_project_config(cfg, rmedia);
     const float fmin = (cfg.min_freq > 0) ? cfg.min_freq : 20.0f;
-    const std::string tmp = tmp_for(cfg.output_path);
-    if (cfg.output_format == "video") {
+    // New bytes go only to the temp file (same directory = same volume).
+    // The guard removes it on every failure return below; commit dismisses
+    // it on success. The final destination is never written directly.
+    TempGuard tmp(make_temp_path(cfg.output_path));
+    const std::string& tmp_path = tmp.path();
+    // Effective format: an explicit format always wins; otherwise a video
+    // extension infers video (same rule the CLI documents). Validation
+    // above already rejected every contradictory combination.
+    const bool is_video = effective_output_format(cfg.output_path, cfg.output_format,
+                                                  cfg.output_format_explicit) == "video";
+    if (is_video) {
         VideoRendererConfig vrcfg;
         vrcfg.width = cfg.width;
         vrcfg.height = cfg.height;
@@ -474,7 +464,7 @@ Error render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& datase
         vrcfg.db_ceiling = 0.0f;
         vrcfg.window_seconds = cfg.window_seconds;
         VideoRenderer vrend(vrcfg);
-        const VideoRenderError verr = vrend.render(dataset, tmp);
+        const VideoRenderError verr = vrend.render(dataset, tmp_path);
         if (verr != VideoRenderError::Ok) {
             // Encoder-open failure with no working ffmpeg is a dependency
             // problem, not a render problem. ffmpeg_available() runs only
@@ -500,11 +490,11 @@ Error render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& datase
             if (renderer.render_gpu(dataset, img) != RenderError::Ok)
                 return Error::make(Subsystem::Render, JobError::RenderError,
                                    "render: spectrogram (GPU) failed for '" + cfg.output_path + "'");
-            if (!PNGEncoder::write_rgba(tmp, img.width, img.height, img.pixels.data()))
+            if (!PNGEncoder::write_rgba(tmp_path, img.width, img.height, img.pixels.data()))
                 return Error::make(Subsystem::Render, JobError::RenderError,
-                                   "render: PNG write failed for '" + tmp + "'");
+                                   "render: PNG write failed for '" + tmp_path + "'");
         } else {
-            if (renderer.render_to_png(dataset, tmp) != RenderError::Ok)
+            if (renderer.render_to_png(dataset, tmp_path) != RenderError::Ok)
                 return Error::make(Subsystem::Render, JobError::RenderError,
                                    "render: spectrogram failed for '" + cfg.output_path + "'");
         }
@@ -513,14 +503,23 @@ Error render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& datase
         ProjectConfigAdapter::to_spectrum_config(rpc, sc);
         sc.freq_min_hz = fmin;
         SpectrumRenderer renderer(sc);
-        if (renderer.render_to_png(dataset, tmp) != SpectrumError::Ok)
+        if (renderer.render_to_png(dataset, tmp_path) != SpectrumError::Ok)
             return Error::make(Subsystem::Render, JobError::RenderError,
                                "render: spectrum failed for '" + cfg.output_path + "'");
     }
 
-    if (!commit_file(tmp, cfg.output_path))
+    // Safe replacement: the OS swaps the complete temp over the destination
+    // without deleting it first, so a failed replacement keeps the previous
+    // valid output. Failure class follows the stage that produced the temp.
+    if (const std::string commit_err = commit_output(tmp_path, cfg.output_path);
+        !commit_err.empty()) {
+        if (is_video)
+            return Error::make(Subsystem::Encode, JobError::EncodeError,
+                               "encode: " + commit_err);
         return Error::make(Subsystem::Pipeline, JobError::RenderError,
-                           "pipeline: cannot commit output '" + cfg.output_path + "'");
+                           "pipeline: " + commit_err);
+    }
+    tmp.dismiss();
     return Error::success();
 }
 

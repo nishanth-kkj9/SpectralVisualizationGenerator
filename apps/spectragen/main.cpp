@@ -241,6 +241,7 @@ static int parse_args(int argc, char* argv[], CliConfig& cfg) {
                 std::cerr << "Error: --output-format must be image or video\n";
                 return 1;
             }
+            cfg.output_format_explicit = true;
             continue;
         }
         if (arg == "--fps") {
@@ -360,9 +361,11 @@ static int parse_args(int argc, char* argv[], CliConfig& cfg) {
         return 1;
     }
 
-    // Auto-detect output format from extension if not explicitly set
+    // Auto-detect output format from extension if not explicitly set.
+    // An explicit --output-format is never overridden: a contradiction
+    // (e.g. explicit image + .mp4) fails closed in validate_config.
     // ponytail: batch outputs are directories (no extension) — guard npos
-    if (cfg.output_format == "image" && !cfg.output_path.empty()) {
+    if (!cfg.output_format_explicit && cfg.output_format == "image" && !cfg.output_path.empty()) {
         auto dot = cfg.output_path.find_last_of('.');
         if (dot != std::string::npos) {
             auto ext = cfg.output_path.substr(dot);

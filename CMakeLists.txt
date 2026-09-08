@@ -15,6 +15,7 @@ add_library(SpectralCore STATIC
     src/core/encoding/video_encoder.cpp
     src/core/encoding/video_renderer.cpp
     src/core/media/media_decoder.cpp
+    src/core/pipeline/output_files.cpp
     src/core/pipeline/pipeline.cpp
     src/core/process/safe_process.cpp
     src/core/project/project_config.cpp
@@ -645,6 +646,17 @@ set_target_properties(test_config_validation PROPERTIES
     WIN32_EXECUTABLE OFF
 )
 add_test(NAME config_validation COMMAND test_config_validation)
+
+add_executable(test_output_files
+    tests/cli/test_output_files.cpp
+)
+target_link_libraries(test_output_files PRIVATE SpectralCore)
+set_target_properties(test_output_files PROPERTIES
+    CXX_VISIBILITY_PRESET "hidden"
+    CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
+    WIN32_EXECUTABLE OFF
+)
+add_test(NAME output_files COMMAND test_output_files)
 
 add_executable(test_reproducibility
     tests/cli/test_reproducibility.cpp

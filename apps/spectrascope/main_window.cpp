@@ -202,6 +202,9 @@ void MainWindow::generate() {
     cfg.output_path = outputEdit_->text().toStdString();
     cfg.visualization = vizCombo_->currentIndex() == 1 ? "spectrum" : "spectrogram";
     cfg.output_format = formatCombo_->currentIndex() == 1 ? "video" : "image";
+    // The combo always decides the format: a typed path with a mismatched
+    // extension (e.g. Image + .mp4) fails closed in validate_config below.
+    cfg.output_format_explicit = true;
     cfg.fft_size = fftCombo_->currentText().toInt();
     cfg.window = windowCombo_->currentText().toStdString();
     cfg.freq_scale = scaleCombo_->currentText().toStdString();

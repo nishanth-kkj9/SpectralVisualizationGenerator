@@ -21,6 +21,16 @@ rejected. `--hop` is authoritative; `--overlap` sets
 hop=round(fft·(1−overlap)) and must agree with `--hop` if both are given.
 `--resolution` is capped at 32768 per side and 268M pixels total.
 
+Output format vs extension: image output is PNG-only, so `--output`
+must end in `.png` (case-insensitive) or have no extension; video output
+requires `.mp4`, `.webm`, or `.mkv` (ffmpeg sniffs the container from the
+extension). Without `--output-format`, a video extension infers video and
+anything else infers image; an explicit `--output-format` that contradicts
+the extension fails instead of silently mislabeling the file. New bytes go
+to a uniquely named temp file beside the destination and replace it on
+success; a failed job never leaves a partial file and never deletes a
+previous valid output.
+
 Batch prints one `OK`/`FAIL` line per file plus a summary; exit is nonzero
 if any file failed. Ctrl-C cancels cleanly. Retries apply per file.
 Examples: see `spectragen --help`.

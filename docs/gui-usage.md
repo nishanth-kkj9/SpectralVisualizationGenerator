@@ -4,6 +4,8 @@ Thin client over the same pipeline as the CLI. No editor/player features.
 
 1. **Select/drop** audio or video (Browse or drag onto the window).
 2. **Visualization**: Spectrogram or Spectrum; output format Image (PNG) or Video (MP4).
+   The format combo always decides: a typed output path whose extension
+   contradicts it (e.g. Image + `.mp4`) is rejected before the job starts.
 3. **Preset**: Voice (1024/hann), Music (2048/hann), Detail (4096/blackman/mel) —
    or adjust FFT, window, scale, resolution, dB range manually.
 4. **Output**: file path (auto-suggested next to input).

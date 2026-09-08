@@ -145,7 +145,10 @@ bool PNGEncoder::write_rgba(const std::string& path,
     if (!ofs) return false;
     ofs.write(reinterpret_cast<const char*>(data.data()),
               static_cast<std::streamsize>(data.size()));
-    return ofs.good();
+    // Explicit close: the destructor would swallow a flush failure and
+    // report success for a truncated file. Commit only complete outputs.
+    ofs.close();
+    return static_cast<bool>(ofs);
 }
 
 bool PNGEncoder::write_rgb(const std::string& path,

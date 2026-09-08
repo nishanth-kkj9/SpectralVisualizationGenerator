@@ -2,6 +2,7 @@
 
 #include "pipeline.h"
 #include "batch.h"
+#include "output_files.h"
 #include "project_config.h"
 #include "spectrogram_renderer.h"
 
@@ -210,11 +211,17 @@ int main() {
                "cancelled job aborts");
     }
 
-    // 16. interrupted jobs leave no residue: success leaves no .part file
+    // 16. interrupted jobs leave no residue: success leaves no temp file
+    // (temps are "<stem>.<pid>.<ctr>.part<ext>"; never valid outputs).
     {
         auto cfg = cfg_for(dir + "/tone.wav", dir + "/o16.png");
         EXPECT(Spectral::run_job(cfg) == Spectral::JobError::Ok, "job ok");
-        EXPECT(!fs::exists(dir + "/o16.part.png"), "no .part residue after success");
+        bool residue = false;
+        for (auto it = fs::directory_iterator(dir); it != fs::directory_iterator();
+             it.increment(ec)) {
+            if (Spectral::is_temp_name(it->path().filename().string())) residue = true;
+        }
+        EXPECT(!residue, "no temp residue after success");
         EXPECT(fs::exists(dir + "/o16.png"), "final output exists");
     }
 

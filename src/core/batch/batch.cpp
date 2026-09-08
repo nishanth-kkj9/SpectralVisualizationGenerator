@@ -1,4 +1,5 @@
 #include "batch.h"
+#include "output_files.h"
 #include "thread_pool.h"
 
 #include <algorithm>
@@ -50,10 +51,14 @@ std::vector<std::string> collect_inputs(const std::string& input, const BatchOpt
         return out;
     }
     if (!fs::is_directory(p, ec)) return out;
+    // Temp files (current or stale crash leftovers) are never inputs, even
+    // when the output directory overlaps the scanned tree. Explicit single
+    // file inputs bypass this: the user named that file on purpose.
     auto push_dir = [&](const fs::path& dir) {
         for (auto it = fs::directory_iterator(dir, ec); it != fs::directory_iterator(); it.increment(ec)) {
             if (ec) break;
-            if (it->is_regular_file(ec) && ext_ok(it->path(), opts.extensions))
+            if (it->is_regular_file(ec) && !is_temp_name(it->path().filename().string()) &&
+                ext_ok(it->path(), opts.extensions))
                 out.push_back(it->path().string());
         }
     };
@@ -61,7 +66,8 @@ std::vector<std::string> collect_inputs(const std::string& input, const BatchOpt
         for (auto it = fs::recursive_directory_iterator(p, ec);
              it != fs::recursive_directory_iterator(); it.increment(ec)) {
             if (ec) break;
-            if (it->is_regular_file(ec) && ext_ok(it->path(), opts.extensions))
+            if (it->is_regular_file(ec) && !is_temp_name(it->path().filename().string()) &&
+                ext_ok(it->path(), opts.extensions))
                 out.push_back(it->path().string());
         }
     } else {
@@ -107,6 +113,44 @@ std::vector<FileResult> run_batch(const GenerateConfig& template_cfg,
 
     std::error_code ec;
     fs::create_directories(output_dir, ec);
+    if (ec) {
+        // Output root unusable: fail every file with the directory cause,
+        // not a later misleading per-file render error.
+        for (size_t i = 0; i < files.size(); ++i) {
+            results[i].input = files[i];
+            results[i].output =
+                batch_output_path(input_root, files[i], output_dir, template_cfg.output_format);
+            results[i].error = "batch: cannot create output directory '" + output_dir +
+                               "': " + ec.message();
+        }
+        return results;
+    }
+
+    // Two inputs (same stem, different container) must never target one
+    // output: concurrent workers would otherwise race on one destination.
+    // Duplicates fail up front with a clear error; nothing runs for them.
+    std::vector<bool> skipped(files.size(), false);
+    {
+        std::vector<std::string> planned(files.size());
+        for (size_t i = 0; i < files.size(); ++i)
+            planned[i] = batch_output_path(input_root, files[i], output_dir,
+                                           template_cfg.output_format);
+        for (size_t i = 0; i < files.size(); ++i) {
+            for (size_t j = i + 1; j < files.size(); ++j) {
+                if (planned[i] == planned[j]) {
+                    skipped[i] = skipped[j] = true;
+                    results[i].input = files[i];
+                    results[i].output = planned[i];
+                    results[i].error = "batch: duplicate output path '" + planned[i] +
+                                       "' for inputs '" + files[i] + "' and '" + files[j] +
+                                       "'; rename inputs or run separately";
+                    results[j].input = files[j];
+                    results[j].output = planned[j];
+                    results[j].error = results[i].error;
+                }
+            }
+        }
+    }
 
     std::mutex prog_mtx;
     int done = 0;
@@ -117,6 +161,16 @@ std::vector<FileResult> run_batch(const GenerateConfig& template_cfg,
             pool.submit([&, i] {
                 FileResult r;
                 r.input = files[i];
+                if (skipped[i]) {
+                    r.output = results[i].output;
+                    r.error = results[i].error;
+                    results[i] = r;
+                    if (progress) {
+                        std::lock_guard lk(prog_mtx);
+                        progress(++done, static_cast<int>(files.size()), files[i].c_str());
+                    }
+                    return;
+                }
                 r.output = batch_output_path(input_root, files[i], output_dir,
                                              template_cfg.output_format);
                 // Ensure mirrored parent dirs exist (threads share output tree)
