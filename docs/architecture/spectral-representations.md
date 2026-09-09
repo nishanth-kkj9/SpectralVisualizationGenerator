@@ -47,7 +47,12 @@ bins) — enforced by `validate_dimensions`.
 64→128 bands, or any Q change moves it; image width or color map does
 not; file paths never do. `ProjectConfig` JSON persists the block
 (scalars only — bin centers are computed data); dataset JSON persists
-it too. The v3 **binary** deliberately excludes it (see below).
+it too, **including `bin_centers`** (so explicit non-STFT centers
+round-trip) plus `analysis_method` and per-frame `band_count`.
+The v3 **binary** deliberately excludes the representation section (see
+below); on load the STFT default is restated from the payload itself
+(bin count from the axis, reassignment support from array presence —
+v3 writers emit those if and only if enabled).
 
 ## Dataset v4 boundary (decision: YES, later)
 
@@ -82,13 +87,36 @@ GPU FFT, renderer/video/batch changes. Pipeline output is unchanged:
 it still produces conventional STFT datasets, now explicitly tagged
 (`kind=stft`, explicit bins, phase available, reassignment per request).
 
+## Phase 8 enforcement (contracts, not just described)
+
+On top of S6.0-H1, the following are now enforced:
+
+- **Validation**: explicit representation ranges must match the actual
+  axis ends; STFT with an implied range requires the full grid, with an
+  explicit range (slice/decimation) every center must lie on the FFT
+  grid; phase normalization without phase capability fails; multiband
+  output (phaseless by construction) is tagged phase N/A.
+- **Transforms**: `filter_band` / `downsample_frequency` retarget axis,
+  analysis bin count, representation bins/range/centers (STFT counts go
+  back to implied; STFT nyquist/resolution untouched, explicit axes
+  refresh nominal values), slice reassigned arrays, and refuse invalid
+  input instead of reading out of bounds. Phase-less data stays
+  phase-less; `export_csv` leaves the phase column empty rather than
+  fabricating values.
+- **Renderers are STFT-only by contract**: spectrogram, spectrum, video,
+  and GPU paths return `UnsupportedRepresentation` for anything else
+  instead of drawing FFT pictures of filterbank data (mapped to
+  `RenderError`/`EncodeError` with the kind named).
+- **Serialization**: binary resets stale representation state on load
+  (v3 is STFT-only); JSON resets then parses, round-tripping kind,
+  bins, range, bands, q, norm, phase, reassignment, version,
+  bin_centers, method, and frame band counts.
+
 ## Remaining FFT-bin assumptions (recorded, not refactored)
 
 These are all correct for STFT data today and must learn the
 representation contract when non-STFT data flows:
 
-- `spectrum_renderer` / `spectrogram_renderer` bin→pixel mapping and
-  `FreqMapper` treat bins as FFT-grid frequencies.
 - `multiband_analyzer` splats onto `max_nfft/2+1` grids.
 - `cpu_backend::fft_batch` (`n_fft/2+1` outputs) — FFT backend, stays.
 - `stft.h` frame math — STFT by definition, stays.

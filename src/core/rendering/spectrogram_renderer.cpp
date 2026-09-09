@@ -218,6 +218,10 @@ RenderError SpectrogramRenderer::render(const SpectralDataset& dataset,
                                         const std::atomic<bool>* cancel) const {
     out.clear();
 
+    // STFT-only renderer: bin indexing below assumes uniform FFT bins.
+    // A future non-STFT representation must never render as FFT data.
+    if (!dataset.representation().is_stft())
+        return RenderError::UnsupportedRepresentation;
     if (cfg_.width <= 0 || cfg_.height <= 0) return RenderError::InvalidDimensions;
     if (dataset.frame_count() <= 0 || dataset.num_frequency_bins() <= 0) {
         return RenderError::EmptyDataset;

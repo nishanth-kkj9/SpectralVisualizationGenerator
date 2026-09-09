@@ -667,6 +667,12 @@ Error render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& datase
         if (verr == VideoRenderError::Cancelled)
             return Error::make(Subsystem::Encode, JobError::Cancelled,
                                "encode: video render cancelled for '" + cfg.output_path + "'");
+        if (verr == VideoRenderError::UnsupportedRepresentation)
+            return Error::make(Subsystem::Encode, JobError::RenderError,
+                               "encode: video renderer supports STFT datasets only, got '" +
+                                   std::string(representation_kind_name(
+                                       dataset.representation().kind)) +
+                                   "'");
         if (verr != VideoRenderError::Ok) {
             // Encoder-open failure with no working ffmpeg is a dependency
             // problem, not a render problem. ffmpeg_available() runs only
@@ -694,6 +700,12 @@ Error render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& datase
                 return Error::make(Subsystem::Render, JobError::Cancelled,
                                    "render: spectrogram cancelled for '" + cfg.output_path +
                                        "'");
+            if (gerr == RenderError::UnsupportedRepresentation)
+                return Error::make(Subsystem::Render, JobError::RenderError,
+                                   "render: spectrogram renderer supports STFT datasets only, got '" +
+                                       std::string(representation_kind_name(
+                                           dataset.representation().kind)) +
+                                       "'");
             if (gerr != RenderError::Ok)
                 return Error::make(Subsystem::Render, JobError::RenderError,
                                    "render: spectrogram (GPU) failed for '" + cfg.output_path + "'");
@@ -705,6 +717,12 @@ Error render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& datase
             if (rerr == RenderError::Cancelled)
                 return Error::make(Subsystem::Render, JobError::Cancelled,
                                    "render: spectrogram cancelled for '" + cfg.output_path +
+                                       "'");
+            if (rerr == RenderError::UnsupportedRepresentation)
+                return Error::make(Subsystem::Render, JobError::RenderError,
+                                   "render: spectrogram renderer supports STFT datasets only, got '" +
+                                       std::string(representation_kind_name(
+                                           dataset.representation().kind)) +
                                        "'");
             if (rerr != RenderError::Ok)
                 return Error::make(Subsystem::Render, JobError::RenderError,
@@ -719,6 +737,12 @@ Error render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& datase
         if (serr == SpectrumError::Cancelled)
             return Error::make(Subsystem::Render, JobError::Cancelled,
                                "render: spectrum cancelled for '" + cfg.output_path + "'");
+        if (serr == SpectrumError::UnsupportedRepresentation)
+            return Error::make(Subsystem::Render, JobError::RenderError,
+                               "render: spectrum renderer supports STFT datasets only, got '" +
+                                   std::string(representation_kind_name(
+                                       dataset.representation().kind)) +
+                                   "'");
         if (serr != SpectrumError::Ok)
             return Error::make(Subsystem::Render, JobError::RenderError,
                                "render: spectrum failed for '" + cfg.output_path + "'");

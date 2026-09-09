@@ -243,18 +243,28 @@ void SpectralDataset::validate_dimensions(ValidationResult& r) const {
         r.add_error("frequency_axis.num_bins must be > 0");
         return;
     }
-    // Representation-aware width contract (S6.0-H1): STFT mirrors the FFT
-    // grid (bins == fft_size/2+1); anything else follows the representation
-    // (explicit bins, never N/2+1). The old universal N/2+1 rule is gone.
+    // Representation-aware width contract (S6.0-H1, Phase 8): STFT with
+    // an implied range mirrors the FFT grid (bins == fft_size/2+1); with
+    // an explicit range (frequency slice/decimation) the axis must be a
+    // subset of the grid and bins must agree with the explicit count.
+    // Non-STFT follows the representation (explicit bins, never N/2+1).
+    const bool rep_range_implied =
+        representation_.fmin_hz == 0.0f && representation_.fmax_hz == 0.0f;
     int expect_bins_decl = nb;
     if (representation_.is_stft()) {
         if (analysis_meta_.fft_size > 0) {
             const int grid = analysis_meta_.fft_size / 2 + 1;
-            if (nb != grid) {
+            if (rep_range_implied) {
+                if (nb != grid) {
+                    r.add_error("frequency_axis.num_bins (" + std::to_string(nb) +
+                                ") != fft_size/2+1 (" + std::to_string(grid) + ")");
+                }
+                expect_bins_decl = grid;
+            } else if (representation_.bins != 0 && representation_.bins != nb) {
                 r.add_error("frequency_axis.num_bins (" + std::to_string(nb) +
-                            ") != fft_size/2+1 (" + std::to_string(grid) + ")");
+                            ") != explicit stft representation bin count (" +
+                            std::to_string(representation_.bins) + ")");
             }
-            expect_bins_decl = grid;
         }
     } else {
         // validate_representation() already rejects bins <= 0; widths below
@@ -338,16 +348,43 @@ void SpectralDataset::validate_dimensions(ValidationResult& r) const {
         }
     }
     // STFT grid formula; non-STFT axes carry explicit centers (ordered,
-    // nonnegative) instead of k*sr/N.
+    // nonnegative) instead of k*sr/N. An STFT axis with an implied range
+    // must be the full grid; with an explicit range (frequency slice or
+    // decimation) every center must still lie exactly on the FFT grid —
+    // subset-of-grid, never off-grid values.
     if (representation_.is_stft()) {
         if (analysis_meta_.fft_size > 0 && analysis_meta_.sample_rate > 0) {
-            for (int k = 0; k < nb && k < static_cast<int>(freq_axis_.bin_frequencies.size()); ++k) {
-                const float expect = static_cast<float>(k) * analysis_meta_.sample_rate /
-                                     static_cast<float>(analysis_meta_.fft_size);
-                if (std::fabs(freq_axis_.bin_frequencies[k] - expect) > 1e-3f * (expect + 1.0f)) {
-                    r.add_error("frequency_axis.bin_frequencies[" + std::to_string(k) +
-                                "] != k*sr/N");
-                    break;
+            if (rep_range_implied) {
+                for (int k = 0;
+                     k < nb && k < static_cast<int>(freq_axis_.bin_frequencies.size());
+                     ++k) {
+                    const float expect =
+                        static_cast<float>(k) * analysis_meta_.sample_rate /
+                        static_cast<float>(analysis_meta_.fft_size);
+                    if (std::fabs(freq_axis_.bin_frequencies[k] - expect) >
+                        1e-3f * (expect + 1.0f)) {
+                        r.add_error("frequency_axis.bin_frequencies[" +
+                                    std::to_string(k) + "] != k*sr/N");
+                        break;
+                    }
+                }
+            } else {
+                const int n = analysis_meta_.fft_size;
+                const int sr = analysis_meta_.sample_rate;
+                for (int k = 0;
+                     k < nb && k < static_cast<int>(freq_axis_.bin_frequencies.size());
+                     ++k) {
+                    const float c = freq_axis_.bin_frequencies[k];
+                    const int kk = static_cast<int>(std::round(
+                        static_cast<double>(c) * n / static_cast<double>(sr)));
+                    const float grid =
+                        static_cast<float>(kk) * sr / static_cast<float>(n);
+                    if (kk < 0 || kk > n / 2 ||
+                        std::fabs(c - grid) > 1e-3f * (std::fabs(c) + 1.0f)) {
+                        r.add_error("frequency_axis.bin_frequencies[" +
+                                    std::to_string(k) + "] not on the FFT grid");
+                        break;
+                    }
                 }
             }
         }
@@ -373,6 +410,27 @@ void SpectralDataset::validate_dimensions(ValidationResult& r) const {
         std::vector<std::string> rep_errs;
         validate_representation(representation_, analysis_meta_.fft_size, rep_errs);
         for (const auto& e : rep_errs) r.add_error("representation: " + e);
+    }
+    // Explicit representation range must match the actual axis centers.
+    // (Implied 0/0 ranges skip this: STFT means full grid by construction.)
+    if (!freq_axis_.bin_frequencies.empty()) {
+        const float first = freq_axis_.bin_frequencies.front();
+        const float last = freq_axis_.bin_frequencies.back();
+        if (representation_.fmin_hz > 0.0f &&
+            std::fabs(first - representation_.fmin_hz) >
+                1e-3f * (std::fabs(representation_.fmin_hz) + 1.0f)) {
+            r.add_error("representation.fmin_hz != first axis center");
+        }
+        if (representation_.fmax_hz > 0.0f &&
+            std::fabs(last - representation_.fmax_hz) >
+                1e-3f * (std::fabs(representation_.fmax_hz) + 1.0f)) {
+            r.add_error("representation.fmax_hz != last axis center");
+        }
+    }
+    // Phase normalization without phase capability is meaningless.
+    if (representation_.phase != RepresentationPhase::Available &&
+        (normalization_.phase_unwrapped || normalization_.phase_reference != 0.0f)) {
+        r.add_error("phase normalization set but representation phase is N/A");
     }
     // Reassigned coordinates without representation support are meaningless.
     if (!representation_.reassignment_supported) {
@@ -525,12 +583,18 @@ const SpectralFrame& SpectralDataset::frame(int index) const {
 std::vector<float> SpectralDataset::mean_magnitude_spectrum() const {
     if (frames_.empty() || freq_axis_.num_bins <= 0) return {};
     std::vector<float> out(freq_axis_.num_bins, 0.0f);
+    int used = 0;
     for (const auto& f : frames_) {
+        // Representation width contract: skip frames that do not cover
+        // the axis instead of reading out of bounds.
+        if (static_cast<int>(f.magnitudes.size()) != freq_axis_.num_bins) continue;
         for (int k = 0; k < freq_axis_.num_bins; ++k) {
             out[k] += f.magnitudes[k];
         }
+        ++used;
     }
-    const float inv = 1.0f / static_cast<float>(frames_.size());
+    if (used == 0) return {};
+    const float inv = 1.0f / static_cast<float>(used);
     for (auto& v : out) v *= inv;
     return out;
 }
@@ -540,6 +604,7 @@ std::vector<float> SpectralDataset::max_magnitude_spectrum() const {
     std::vector<float> out(freq_axis_.num_bins,
                           -std::numeric_limits<float>::infinity());
     for (const auto& f : frames_) {
+        if (static_cast<int>(f.magnitudes.size()) != freq_axis_.num_bins) continue;
         for (int k = 0; k < freq_axis_.num_bins; ++k) {
             out[k] = std::max(out[k], f.magnitudes[k]);
         }
@@ -552,6 +617,7 @@ std::vector<float> SpectralDataset::min_magnitude_spectrum() const {
     std::vector<float> out(freq_axis_.num_bins,
                           std::numeric_limits<float>::infinity());
     for (const auto& f : frames_) {
+        if (static_cast<int>(f.magnitudes.size()) != freq_axis_.num_bins) continue;
         for (int k = 0; k < freq_axis_.num_bins; ++k) {
             out[k] = std::min(out[k], f.magnitudes[k]);
         }
@@ -563,7 +629,62 @@ std::vector<float> SpectralDataset::min_magnitude_spectrum() const {
 // Filters
 // ============================================================================
 
+namespace {
+
+// Refresh axis + representation metadata after keeping an ordered subset
+// of bins with the given centers. Kind, norm, phase capability, and
+// reassignment support are preserved untouched: frequency slicing keeps
+// WHAT was computed with a narrowed range. STFT axes keep sr/2 + sr/N
+// (still true for slices/decimations); explicit axes refresh their
+// nominal maximum/mean-spacing from the kept centers.
+void retarget_frequency_bins(FrequencyAxis& ax, RepresentationInfo& rep,
+                             int& meta_bins, std::vector<float> centers,
+                             bool is_stft) {
+    const int n = static_cast<int>(centers.size());
+    ax.num_bins = n;
+    ax.bin_frequencies = std::move(centers);
+    meta_bins = n;
+    if (!rep.bin_centers.empty()) rep.bin_centers = ax.bin_frequencies;
+    if (is_stft) {
+        // STFT counts are always grid-derivable: a narrowed axis goes back
+        // to implied (bins == 0) rather than storing a count that could be
+        // mistaken for a new FFT grid. The explicit range below pins the
+        // actual span; subset-of-grid validation covers the rest.
+        rep.bins = 0;
+    } else if (rep.bins != 0) {
+        rep.bins = n;
+    }
+    if (!ax.bin_frequencies.empty()) {
+        rep.fmin_hz = ax.bin_frequencies.front();
+        rep.fmax_hz = ax.bin_frequencies.back();
+        if (!is_stft) {
+            ax.nyquist = ax.bin_frequencies.back();
+            ax.resolution =
+                n > 1 ? (ax.bin_frequencies.back() - ax.bin_frequencies.front()) /
+                            static_cast<float>(n - 1)
+                      : 0.0f;
+        }
+    }
+}
+
+// Frame widths must match the axis before any per-bin slicing; otherwise
+// the operation refuses (returns false) and the caller keeps the valid
+// original instead of reading out of bounds.
+bool frames_match_axis(const SpectralDataset& d, const FrequencyAxis& ax) {
+    const int nb = ax.num_bins;
+    if (nb <= 0 || static_cast<int>(ax.bin_frequencies.size()) != nb) return false;
+    for (int i = 0; i < d.frame_count(); ++i) {
+        const auto& f = d.frame(i);
+        if (static_cast<int>(f.magnitudes.size()) != nb) return false;
+        if (!f.phases.empty() && static_cast<int>(f.phases.size()) != nb) return false;
+    }
+    return true;
+}
+
+} // namespace
+
 SpectralDataset SpectralDataset::filter_band(float low_hz, float high_hz) const {
+    if (!check_dimensions()) return *this;
     SpectralDataset out = *this;
     int lo = -1, hi = -1;
     for (int k = 0; k < freq_axis_.num_bins; ++k) {
@@ -576,24 +697,31 @@ SpectralDataset SpectralDataset::filter_band(float low_hz, float high_hz) const 
         out.time_axis_.frame_times.clear();
         return out;
     }
+    if (!frames_match_axis(*this, freq_axis_)) return *this;
     const int new_bins = hi - lo + 1;
-    out.freq_axis_.num_bins = new_bins;
-    out.freq_axis_.bin_frequencies.assign(
-        freq_axis_.bin_frequencies.begin() + lo,
-        freq_axis_.bin_frequencies.begin() + hi + 1);
-    out.analysis_meta_.num_frequency_bins = new_bins;
     for (auto& f : out.frames_) {
-        f.magnitudes.assign(
-            f.magnitudes.begin() + lo,
-            f.magnitudes.begin() + hi + 1);
-        f.phases.assign(
-            f.phases.begin() + lo,
-            f.phases.begin() + hi + 1);
+        f.magnitudes.assign(f.magnitudes.begin() + lo, f.magnitudes.begin() + hi + 1);
+        // Phase-less data stays phase-less; mismatched vectors were
+        // excluded by the frames_match_axis guard above.
+        if (!f.phases.empty())
+            f.phases.assign(f.phases.begin() + lo, f.phases.begin() + hi + 1);
         f.power.assign(f.magnitudes.begin(), f.magnitudes.end());
         for (size_t k = 0; k < f.magnitudes.size(); ++k) {
             f.power[k] = f.magnitudes[k] * f.magnitudes[k];
         }
+        // Reassigned coordinates track their bins; absent stays absent.
+        if (!f.reassigned_times.empty())
+            f.reassigned_times.assign(f.reassigned_times.begin() + lo,
+                                      f.reassigned_times.begin() + hi + 1);
+        if (!f.reassigned_freqs.empty())
+            f.reassigned_freqs.assign(f.reassigned_freqs.begin() + lo,
+                                      f.reassigned_freqs.begin() + hi + 1);
     }
+    retarget_frequency_bins(out.freq_axis_, out.representation_,
+                            out.analysis_meta_.num_frequency_bins,
+                            std::vector<float>(freq_axis_.bin_frequencies.begin() + lo,
+                                               freq_axis_.bin_frequencies.begin() + hi + 1),
+                            representation_.is_stft());
     return out;
 }
 
@@ -647,31 +775,41 @@ SpectralDataset SpectralDataset::downsample_time(int factor) const {
 
 SpectralDataset SpectralDataset::downsample_frequency(int factor) const {
     if (factor <= 1) return *this;
+    if (!check_dimensions()) return *this;
     SpectralDataset out = *this;
-    int new_bins = 0;
-    for (int k = 0; k < freq_axis_.num_bins; k += factor) ++new_bins;
-    out.freq_axis_.num_bins = new_bins;
-    out.freq_axis_.bin_frequencies.clear();
+    if (!frames_match_axis(*this, freq_axis_)) return *this;
+    std::vector<float> centers;
     for (int k = 0; k < freq_axis_.num_bins; k += factor) {
-        out.freq_axis_.bin_frequencies.push_back(freq_axis_.bin_frequencies[k]);
+        centers.push_back(freq_axis_.bin_frequencies[static_cast<size_t>(k)]);
     }
-    out.freq_axis_.resolution = freq_axis_.resolution * factor;
-    out.analysis_meta_.num_frequency_bins = new_bins;
     for (auto& f : out.frames_) {
-        std::vector<float> nm, np;
-        nm.reserve(new_bins);
-        np.reserve(new_bins);
+        std::vector<float> nm, np, nrt, nrf;
+        nm.reserve(centers.size());
+        np.reserve(centers.size());
         for (int k = 0; k < freq_axis_.num_bins; k += factor) {
-            nm.push_back(f.magnitudes[k]);
-            np.push_back(f.phases[k]);
+            nm.push_back(f.magnitudes[static_cast<size_t>(k)]);
+            if (!f.phases.empty()) np.push_back(f.phases[static_cast<size_t>(k)]);
+            if (!f.reassigned_times.empty())
+                nrt.push_back(f.reassigned_times[static_cast<size_t>(k)]);
+            if (!f.reassigned_freqs.empty())
+                nrf.push_back(f.reassigned_freqs[static_cast<size_t>(k)]);
         }
         f.magnitudes = std::move(nm);
         f.phases = std::move(np);
+        f.reassigned_times = std::move(nrt);
+        f.reassigned_freqs = std::move(nrf);
         f.power.assign(f.magnitudes.begin(), f.magnitudes.end());
         for (size_t k = 0; k < f.magnitudes.size(); ++k) {
             f.power[k] = f.magnitudes[k] * f.magnitudes[k];
         }
     }
+    // Strided decimation keeps uniform spacing scaled by the factor for
+    // STFT; retarget recomputes the nominal values for explicit axes.
+    retarget_frequency_bins(out.freq_axis_, out.representation_,
+                            out.analysis_meta_.num_frequency_bins, std::move(centers),
+                            representation_.is_stft());
+    if (representation_.is_stft())
+        out.freq_axis_.resolution = freq_axis_.resolution * factor;
     return out;
 }
 
@@ -686,12 +824,18 @@ bool SpectralDataset::export_csv(const std::string& path) const {
     ofs << std::fixed << std::setprecision(6);
     for (size_t i = 0; i < frames_.size(); ++i) {
         const auto& f = frames_[i];
+        // Width contract: skip frames that do not cover the axis. Phase
+        // is written only when the frame carries it (phase-less data
+        // leaves the column empty rather than fabricating values).
+        if (static_cast<int>(f.magnitudes.size()) != freq_axis_.num_bins) continue;
+        const bool has_phase =
+            static_cast<int>(f.phases.size()) == freq_axis_.num_bins;
         for (int k = 0; k < freq_axis_.num_bins; ++k) {
             const float mag = f.magnitudes[k];
-            const float ph  = f.phases[k];
             ofs << f.frame_index << ',' << f.timestamp << ','
-                << freq_axis_.bin_frequencies[k] << ','
-                << mag << ',' << ph << ',' << (mag * mag) << '\n';
+                << freq_axis_.bin_frequencies[k] << ',' << mag << ',';
+            if (has_phase) ofs << f.phases[k];
+            ofs << ',' << (mag * mag) << '\n';
         }
     }
     return ofs.good();
@@ -1013,7 +1157,21 @@ bool SpectralDataset::deserialize_binary(const uint8_t* data, size_t size) {
     if (!read_metadata(data, BINARY_HEADER_SIZE + payload_size, off)) return false;
     if (!read_axes(data, BINARY_HEADER_SIZE + payload_size, off)) return false;
     if (!read_frames(data, BINARY_HEADER_SIZE + payload_size, off)) return false;
-
+    // v3 is STFT-only by construction (serialize_binary refuses anything
+    // else): reset the representation instead of inheriting possibly stale
+    // state from a reused object. Reassignment support is reconstructed
+    // from the payload itself — v3 writers emit coordinate arrays if and
+    // only if support was enabled, so presence here is proof, not a guess.
+    // The bin count is restated from the axis for the same reason (v3
+    // readers already enforce frame widths == axis bins).
+    representation_ = RepresentationInfo::stft_default();
+    representation_.bins = freq_axis_.num_bins;
+    for (const auto& f : frames_) {
+        if (!f.reassigned_times.empty() || !f.reassigned_freqs.empty()) {
+            representation_.reassignment_supported = true;
+            break;
+        }
+    }
     return true;
 }
 
@@ -1061,7 +1219,8 @@ void write_json_metadata(std::ostringstream& os, const SpectralDataset& d) {
     os << "    \"frame_duration_seconds\": " << fp_to_string(d.analysis_metadata().frame_duration_seconds) << ",\n";
     os << "    \"total_duration_seconds\": " << fp_to_string(d.analysis_metadata().total_duration_seconds) << ",\n";
     os << "    \"total_frames\": " << d.analysis_metadata().total_frames << ",\n";
-    os << "    \"analyzer_version\": \"" << json_escape(d.analysis_metadata().analyzer_version) << "\"\n";
+    os << "    \"analyzer_version\": \"" << json_escape(d.analysis_metadata().analyzer_version) << "\",\n";
+    os << "    \"analysis_method\": \"" << json_escape(d.analysis_metadata().analysis_method) << "\"\n";
     os << "  },\n";
 
     os << "  \"normalization\": {\n";
@@ -1100,7 +1259,13 @@ void write_json_metadata(std::ostringstream& os, const SpectralDataset& d) {
     os << "    \"norm\": \"" << representation_norm_name(rep.norm) << "\",\n";
     os << "    \"phase\": \"" << (rep.phase == RepresentationPhase::Available ? "available" : "n/a") << "\",\n";
     os << "    \"reassignment\": " << (rep.reassignment_supported ? "true" : "false") << ",\n";
-    os << "    \"version\": " << rep.version << "\n";
+    os << "    \"version\": " << rep.version << ",\n";
+    os << "    \"bin_centers\": [";
+    for (size_t i = 0; i < rep.bin_centers.size(); ++i) {
+        if (i) os << ",";
+        os << fp_to_string(rep.bin_centers[i]);
+    }
+    os << "]\n";
     os << "  }\n";
 }
 
@@ -1144,6 +1309,7 @@ std::string SpectralDataset::serialize_json(bool pretty) const {
         os << "    {\n";
         os << "      \"frame_index\": " << f.frame_index << ",\n";
         os << "      \"n_fft\": " << f.n_fft << ",\n";
+        os << "      \"band_count\": " << f.band_count << ",\n";
         os << "      \"window_factor\": " << fp_to_string(f.window_factor) << ",\n";
         os << "      \"timestamp\": " << fp_to_string(f.timestamp) << ",\n";
         os << "      \"rms\": " << fp_to_string(f.rms) << ",\n";
@@ -1346,6 +1512,10 @@ bool SpectralDataset::deserialize_json(const std::string& json) {
         if (ver > SPECTRAL_DATASET_VERSION) return false;
         version_ = ver;
     }
+    // Fresh representation state: an absent section means STFT default
+    // (pre-S6.0 files); a present section overwrites every field below.
+    // Never inherit stale state from a reused object.
+    representation_ = RepresentationInfo::stft_default();
 
     // ---- source section ----
     {
@@ -1407,6 +1577,12 @@ bool SpectralDataset::deserialize_json(const std::string& json) {
             extract_number(find_in_range("total_frames", sec, 0)));
         analysis_meta_.analyzer_version =
             extract_string(find_in_range("analyzer_version", sec, 0));
+        // Provenance round-trip: written by serialize_json, absent (empty)
+        // in older files — accepted as-is either way.
+        analysis_meta_.analysis_method =
+            extract_string(find_in_range("analysis_method", sec, 0));
+        if (analysis_meta_.analysis_method.empty())
+            analysis_meta_.analysis_method = "stft";
     }
 
     // ---- normalization section ----
@@ -1474,6 +1650,7 @@ bool SpectralDataset::deserialize_json(const std::string& json) {
                                                           : RepresentationPhase::NotApplicable;
             representation_.reassignment_supported = extract_bool(grab("reassignment"));
             representation_.version = static_cast<uint32_t>(extract_number(grab("version")));
+            representation_.bin_centers = extract_array_floats(grab("bin_centers"));
         }
     }
 
@@ -1556,6 +1733,8 @@ bool SpectralDataset::deserialize_json(const std::string& json) {
             };
             f.frame_index = static_cast<int>(extract_number(fget("frame_index")));
             f.n_fft = static_cast<int>(extract_number(fget("n_fft")));
+            f.band_count = static_cast<int>(extract_number(fget("band_count")));
+            if (f.band_count <= 0) f.band_count = 1;  // absent in older files
             f.window_factor = static_cast<float>(extract_number(fget("window_factor")));
             f.timestamp = extract_number(fget("timestamp"));
             f.rms = static_cast<float>(extract_number(fget("rms")));

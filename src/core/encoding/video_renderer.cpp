@@ -17,6 +17,8 @@ VideoRenderError VideoRenderer::render_frame(const SpectralDataset& dataset,
                                              RGBAImage& out) const {
     out.clear();
     if (dataset.frame_count() == 0) return VideoRenderError::EmptyDataset;
+    if (!dataset.representation().is_stft())
+        return VideoRenderError::UnsupportedRepresentation;
 
     const int W = cfg_.width;
     const int H = cfg_.height;
@@ -60,9 +62,13 @@ VideoRenderError VideoRenderer::render_frame(const SpectralDataset& dataset,
     if (idx_lo >= Nf) idx_lo = Nf - 1;
     if (idx_hi < idx_lo) idx_hi = idx_lo;
 
-    // Build a subset dataset with timestamps shifted to [0, win_sec]
+    // Build a subset dataset with timestamps shifted to [0, win_sec].
+    // Representation/normalization travel with the frames so the subset
+    // stays as truthful as its source.
     SpectralDataset subset;
     subset.mutable_frequency_axis() = dataset.frequency_axis();
+    subset.mutable_representation() = dataset.representation();
+    subset.mutable_normalization_info() = dataset.normalization_info();
 
     const double t_offset = t_start;
     for (int i = idx_lo; i <= idx_hi; ++i) {
@@ -106,6 +112,10 @@ VideoRenderError VideoRenderer::render(const SpectralDataset& dataset,
                                        const std::string& output_path,
                                        const std::atomic<bool>* cancel) const {
     if (dataset.frame_count() == 0) return VideoRenderError::EmptyDataset;
+    // Video frames are STFT spectrogram slices; refuse anything else
+    // rather than encoding misleading pictures.
+    if (!dataset.representation().is_stft())
+        return VideoRenderError::UnsupportedRepresentation;
 
     // Open encoder
     VideoEncoder encoder;

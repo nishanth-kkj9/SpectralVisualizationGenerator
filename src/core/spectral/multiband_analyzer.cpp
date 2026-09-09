@@ -285,6 +285,11 @@ MultiBandAnalyzer::AnalyzeResult MultiBandAnalyzer::analyze(
     auto t1 = std::chrono::high_resolution_clock::now();
     float ms = std::chrono::duration<float, std::milli>(t1 - t0).count();
 
+    // Truthful representation: STFT-grid merged magnitudes, but no phase
+    // is ever computed — mark it NotApplicable so validation (which
+    // forbids fabricated phase) accepts this dataset.
+    dataset.mutable_representation().phase = RepresentationPhase::NotApplicable;
+
     return { dataset, ms };
 }
 
@@ -392,6 +397,9 @@ MultiBandAnalyzer::AnalyzeResult MultiBandAnalyzer::analyze_single(
 
     auto t1 = std::chrono::high_resolution_clock::now();
     float ms = std::chrono::duration<float, std::milli>(t1 - t0).count();
+
+    // Same phaseless-STFT contract as analyze(): magnitudes only.
+    dataset.mutable_representation().phase = RepresentationPhase::NotApplicable;
 
     return { dataset, ms };
 }

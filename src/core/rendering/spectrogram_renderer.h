@@ -82,6 +82,7 @@ enum class RenderError {
     InvalidDimensions,
     InvalidFrequencyRange,
     Cancelled,  // caller-requested cancellation; out is cleared
+    UnsupportedRepresentation,  // only STFT datasets can be rendered
 };
 
 // ============================================================================

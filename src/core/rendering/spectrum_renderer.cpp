@@ -407,6 +407,9 @@ SpectrumError SpectrumRenderer::render(const SpectralDataset& dataset,
                                        RGBAImage& out,
                                        const std::atomic<bool>* cancel) const {
     out.clear();
+    // STFT-only renderer (uniform-bin line plot); refuse the misleading
+    // alternative of drawing non-STFT bins as FFT data.
+    if (!dataset.representation().is_stft()) return SpectrumError::UnsupportedRepresentation;
     if (cfg_.width <= 0 || cfg_.height <= 0) return SpectrumError::InvalidDimensions;
     if (dataset.frame_count() <= 0 || dataset.num_frequency_bins() <= 0) {
         return SpectrumError::EmptyDataset;

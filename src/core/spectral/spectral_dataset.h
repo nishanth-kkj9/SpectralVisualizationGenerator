@@ -115,6 +115,14 @@ struct AnalysisMetadata {
 // ============================================================================
 // Normalization information
 // ============================================================================
+// Applicability contract (Phase 8):
+// - window_coherent_gain / window_energy_gain: STFT window normalization.
+//   Meaningless for non-STFT representations (kept at neutral defaults).
+// - magnitude_scale / reference_amplitude / db_floor / db_reference:
+//   universal display scaling (apply to any magnitude-like data).
+// - phase_unwrapped / phase_reference: meaningful only when the dataset
+//   representation marks phase Available.
+// - channel_normalized: universal flag, independent of representation.
 struct NormalizationInfo {
     // Window normalization
     float window_coherent_gain = 0.5f;   // Sum(window) / N
@@ -160,7 +168,10 @@ struct FrequencyAxis {
     int sample_rate = 0;
     std::vector<float> bin_frequencies;  // Size = num_bins
     float nyquist = 0.0f;
-    float resolution = 0.0f;             // Hz per bin (STFT); nominal otherwise
+    // STFT: exact uniform spacing (sr/N). Explicit axes: nominal mean
+    // spacing ((last-first)/(bins-1)); bin_frequencies stay authoritative
+    // and generic code must map through them, never this scalar.
+    float resolution = 0.0f;
     
     FrequencyAxis() = default;
     static FrequencyAxis from_centers(const std::vector<float>& centers, int sr) {
@@ -401,6 +412,8 @@ public:
     int hop_size() const { return analysis_meta_.hop_size; }
     int num_frequency_bins() const { return freq_axis_.num_bins; }
     float nyquist_frequency() const { return freq_axis_.nyquist; }
+    // STFT-exact uniform spacing; for explicit axes the nominal mean
+    // spacing (bin_frequencies are authoritative for any mapping).
     float frequency_resolution() const { return freq_axis_.resolution; }
     
     // Spectral statistics

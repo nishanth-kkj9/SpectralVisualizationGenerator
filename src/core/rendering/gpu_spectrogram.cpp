@@ -253,6 +253,9 @@ RenderError GpuSpectrogram::render(const SpectralDataset& dataset,
     ID3D11ComputeShader* cs_shader = colormap_shader_.Get();
     if (!vs_shader || !cs_shader) return RenderError::EmptyDataset;
     if (cfg.width <= 0 || cfg.height <= 0) return RenderError::InvalidDimensions;
+    // Same STFT-only contract as the CPU renderer (uniform FFT bins).
+    if (!dataset.representation().is_stft())
+        return RenderError::UnsupportedRepresentation;
     if (dataset.frame_count() <= 0 || dataset.num_frequency_bins() <= 0)
         return RenderError::EmptyDataset;
 

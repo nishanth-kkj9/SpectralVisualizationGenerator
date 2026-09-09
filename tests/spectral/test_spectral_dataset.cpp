@@ -87,6 +87,10 @@ SpectralDataset build_synthetic(int n_fft = 1024,
 
     d.mutable_frequency_axis() = FrequencyAxis(n_fft, sample_rate);
     d.mutable_time_axis() = TimeAxis(n_frames, n_fft / 2, sample_rate);
+    // Explicit pipeline-realistic representation: v3 binary round-trips
+    // restate the observed bin count, so implied (bins == 0) fixtures
+    // would compare unequal after a load despite identical content.
+    d.mutable_representation().bins = n_fft / 2 + 1;
 
     // Deterministic frame content: pure sine at 1kHz should peak at bin ~46
     // (44100/1024 ≈ 43.07 Hz/bin, so 1000/43.07 ≈ 23.2, peak at bin 23).
