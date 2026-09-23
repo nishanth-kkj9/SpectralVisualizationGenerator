@@ -40,24 +40,46 @@ MelRenderError MelSpectrogramRenderer::render(const SpectralDataset& dataset,
     out.height = H;
     out.pixels.assign(static_cast<size_t>(W) * H * 4, 0);
 
-    const double total_dur = dataset.total_duration();
     const float ref =
         dataset.normalization_info().reference_amplitude > 0.0f
             ? dataset.normalization_info().reference_amplitude
             : cfg_.reference_amplitude;
 
-    // Precompute the source frame per column (nearest in time) and the
-    // source band per row (band 0 at the bottom, like frequency).
+    // Temporal convention mirrors the STFT renderer's TimeMapper: column x
+    // covers time t = (x / (W-1)) * total_duration and shows the frame whose
+    // timestamp is nearest to t. Frames therefore land at their own real
+    // times (frame 0 in column 0) instead of being stretched by index, so a
+    // Mel image covers the same time span as the STFT image of the same
+    // dataset. W == 1 or a single frame maps to frame 0 (no division by
+    // zero, no NaN); a dataset without a usable time axis falls back to the
+    // endpoint-preserving index stretch so every column still shows a frame.
     std::vector<int> col_frame(W, 0);
-    for (int x = 0; x < W; ++x) {
-        const double t = (total_dur > 0.0) ? (static_cast<double>(x) / W) * total_dur : 0.0;
-        int fi = 0;
-        if (dataset.frame_count() > 1 && total_dur > 0.0) {
-            fi = static_cast<int>(t / total_dur * (Nf - 1) + 0.5);
+    if (W > 1 && Nf > 1) {
+        const std::vector<double>& times = dataset.time_axis().frame_times;
+        const double total = dataset.total_duration();
+        const bool timed = total > 0.0 && static_cast<int>(times.size()) == Nf &&
+                           times.front() == 0.0 && times.back() > times.front();
+        for (int x = 0; x < W; ++x) {
+            int fi = 0;
+            if (timed) {
+                const double t = (static_cast<double>(x) / (W - 1)) * total;
+                // Timestamps are non-decreasing: the first index not below t,
+                // then the nearer of it and its predecessor.
+                const auto it = std::lower_bound(times.begin(), times.end(), t);
+                fi = static_cast<int>(it - times.begin());
+                if (fi > 0 && fi < Nf) {
+                    const double d_next = times[static_cast<size_t>(fi)] - t;
+                    const double d_prev = t - times[static_cast<size_t>(fi - 1)];
+                    if (d_prev <= d_next) --fi;
+                }
+            } else {
+                fi = static_cast<int>(std::llround(
+                    (static_cast<double>(x) / (W - 1)) * (Nf - 1)));
+            }
             if (fi < 0) fi = 0;
             if (fi >= Nf) fi = Nf - 1;
+            col_frame[x] = fi;
         }
-        col_frame[x] = fi;
     }
     for (int y = 0; y < H; ++y) {
         if (cancel && cancel->load(std::memory_order_acquire)) {

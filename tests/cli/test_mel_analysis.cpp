@@ -10,6 +10,7 @@
 #include "pipeline.h"
 #include "stft.h"
 
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -503,6 +504,143 @@ static void test_matrix() {
     }
 }
 
+// --- temporal column mapping --------------------------------------------------------
+// Build a synthetic Mel dataset whose frames are trivially distinguishable:
+// frame f has every band set to (f+1)*0.2 so first != last. Rendering must
+// follow the STFT TimeMapper convention: column x covers time
+// t = x/(W-1) * total_duration and shows the frame nearest that time
+// (frames sit at their real timestamps beginning at 0). So the first column
+// is frame 0, the last column is the final frame, and interior columns land
+// on the nearest real timestamp -- not on an index stretch. The previously
+// committed x/W mapping put the last column at ~round((Nf-1)/2) for W=2, and
+// index stretching put W=4 column 1 on frame 1 instead of frame 2.
+static Spectral::SpectralDataset make_temporal_mel(int bands, int frames) {
+    Spectral::SpectralDataset d;
+    std::vector<float> centers(static_cast<size_t>(bands));
+    for (int b = 0; b < bands; ++b)
+        centers[static_cast<size_t>(b)] = 100.0f + 200.0f * b;
+    d.mutable_frequency_axis() = Spectral::FrequencyAxis::from_centers(centers, 22050);
+    auto& am = d.mutable_analysis_metadata();
+    am.fft_size = 1024;
+    am.hop_size = 256;
+    am.sample_rate = 22050;
+    am.num_frequency_bins = bands;
+    am.nyquist_frequency = 11025.0f;
+    auto& rep = d.mutable_representation();
+    rep.kind = Spectral::RepresentationKind::Mel;
+    rep.bins = bands;
+    rep.fmin_hz = centers.front();
+    rep.fmax_hz = centers.back();
+    rep.bands = bands;
+    rep.norm = Spectral::RepresentationNorm::None;
+    rep.phase = Spectral::RepresentationPhase::NotApplicable;
+    rep.reassignment_supported = false;
+    rep.bin_centers = centers;
+    d.mutable_time_axis() = Spectral::TimeAxis(frames, 256, 22050);
+    for (int f = 0; f < frames; ++f) {
+        Spectral::SpectralFrame fr;
+        fr.frame_index = f;
+        fr.n_fft = 0;
+        fr.timestamp = static_cast<double>(f * 256) / 22050;
+        fr.magnitudes.assign(static_cast<size_t>(bands), 0.2f * (f + 1));
+        fr.power.assign(static_cast<size_t>(bands), 0.0f);
+        for (int k = 0; k < bands; ++k)
+            fr.power[static_cast<size_t>(k)] =
+                fr.magnitudes[static_cast<size_t>(k)] *
+                fr.magnitudes[static_cast<size_t>(k)];
+        d.add_frame(fr);
+    }
+    return d;
+}
+
+static void column_pixels(const Spectral::RGBAImage& img, int x, std::vector<uint8_t>& out) {
+    out.clear();
+    out.reserve(static_cast<size_t>(img.height) * 4);
+    for (int y = 0; y < img.height; ++y) {
+        const uint8_t* p =
+            &img.pixels[(static_cast<size_t>(y) * img.width + x) * 4];
+        out.insert(out.end(), p, p + 4);
+    }
+}
+
+static void test_temporal_mapping() {
+    std::printf("[temporal_mapping]\n");
+    const int bands = 8, frames = 5, height = 4;
+    Spectral::SpectralDataset ds = make_temporal_mel(bands, frames);
+    CHECK(ds.validate().valid, "temporal fixture validates");
+    auto render_w = [&](int w, Spectral::RGBAImage& img) {
+        Spectral::MelSpectrogramConfig mc;
+        mc.width = w;
+        mc.height = height;
+        Spectral::MelSpectrogramRenderer r(mc);
+        return r.render(ds, img);
+    };
+    // Single 96x192 expected pixel for (frame, band): mirrors the renderer
+    // chain (20*log10 mag + normalize_db + viridis) without reusing its
+    // column selection, so a wrong column cannot hide.
+    auto expect_px = [&](int frame, int band) {
+        const float mag = 0.2f * (frame + 1);
+        const float ref = ds.normalization_info().reference_amplitude;
+        const float db = 20.0f * std::log10(mag / ref);
+        const float t = Spectral::SpectrogramRenderer::normalize_db(
+            db, -90.0f, 0.0f);
+        uint8_t r = 0, g = 0, b = 0;
+        Spectral::SpectrogramRenderer::color_map(Spectral::ColorMap::Viridis,
+                                                t, r, g, b);
+        return std::array<uint8_t, 4>{r, g, b, 255};
+    };
+    auto col_matches_frame = [&](const Spectral::RGBAImage& img, int x,
+                                 int frame) {
+        for (int y = 0; y < height; ++y) {
+            const int band = bands - 1 -
+                static_cast<int>(std::llround(static_cast<double>(y) /
+                                              (height - 1) * (bands - 1)));
+            const auto e = expect_px(frame, band);
+            const uint8_t* p =
+                &img.pixels[(static_cast<size_t>(y) * img.width + x) * 4];
+            for (int c = 0; c < 4; ++c)
+                if (p[c] != e[static_cast<size_t>(c)]) return false;
+        }
+        return true;
+    };
+    {
+        Spectral::RGBAImage img;
+        CHECK(render_w(1, img) == Spectral::MelRenderError::Ok,
+              "temporal W=1 renders");
+        CHECK(img.width == 1 && img.height == height, "temporal W=1 dims");
+        CHECK(col_matches_frame(img, 0, 0), "W=1 shows the first frame");
+    }
+    for (int w : {2, 4, 16}) {
+        Spectral::RGBAImage img;
+        CHECK(render_w(w, img) == Spectral::MelRenderError::Ok,
+              "temporal renders");
+        CHECK(img.width == w && img.height == height, "temporal dims");
+        CHECK(col_matches_frame(img, 0, 0), "first column is frame 0");
+        CHECK(col_matches_frame(img, w - 1, frames - 1),
+              "last column is the final frame");
+        // Whole-column sanity: the old x/W build maps the W=2 last column
+        // to frame ~1, which this pixel comparison rejects.
+        std::vector<uint8_t> first, last;
+        column_pixels(img, 0, first);
+        column_pixels(img, w - 1, last);
+        CHECK(first != last, "endpoints distinguishable");
+        CHECK(!col_matches_frame(img, w - 1, 0),
+              "last column is not the first frame");
+    }
+    {
+        // Interior columns follow the real timestamps: W=4 over 5 frames
+        // spans times {0, 1/3, 2/3, 1} * total_duration, whose nearest frames
+        // are {0, 2, 3, 4}. Index stretching would give {0, 1, 3, 4}.
+        Spectral::RGBAImage img;
+        CHECK(render_w(4, img) == Spectral::MelRenderError::Ok,
+              "interior mapping renders");
+        const int expected[4] = {0, 2, 3, 4};
+        for (int x = 0; x < 4; ++x)
+            CHECK(col_matches_frame(img, x, expected[x]),
+                  "column shows the frame nearest its time");
+    }
+}
+
 // --- rendering + fingerprint + serialization ----------------------------------------------
 static void test_render_fingerprint_serial() {
     std::printf("[render_fingerprint_serial]\n");
@@ -712,6 +850,7 @@ int main() {
     test_amplitude_domain();
     test_frame_reference();
     test_matrix();
+    test_temporal_mapping();
     test_render_fingerprint_serial();
     test_memory_cancel();
     fs::remove_all(g_dir, ec);

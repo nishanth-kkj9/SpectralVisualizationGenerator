@@ -184,7 +184,13 @@ is still STFT data.
   (`src/core/rendering/mel_renderer.cpp`) maps the explicit centers to image
   rows and frames to columns, using the same `normalize_db`/`color_map`
   helpers and dB convention (`20*log10(mag/ref)`) as the STFT renderer. It
-  refuses STFT and every other kind. `SpectrogramRenderer` stays STFT-only
+  refuses STFT and every other kind. Time follows the STFT `TimeMapper`
+  convention: column `x` covers `t = x/(W-1) * total_duration` and shows the
+  frame whose real timestamp is nearest to `t`, so the first column is frame
+  0 and the last column is the final frame (never an index stretch, never a
+  column past the end). Geometry edges are defined: `W == 1` shows frame 0,
+  `H == 1` shows the middle band, `Nb == 1` shows band 0 — no `H-1`/`W-1`
+  division can produce NaN or UB. `SpectrogramRenderer` stays STFT-only
   and never guesses a kind; `VideoRenderer` and the pipeline's image path
   dispatch on the dataset kind, so a Mel run renders through the Mel
   renderer and an STFT run is untouched.
