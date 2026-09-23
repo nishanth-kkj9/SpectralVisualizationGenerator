@@ -437,8 +437,12 @@ static void test_cli_cancel() {
         return;
     }
     const fs::path wav = g_dir / "cli_long.wav";
-    write_wav(wav, 600);  // ~52MB + heavy analysis: tens of seconds of work
-                          // even with the planned FFT engine
+    // 1800 s of 22.05 kHz mono. The streaming + reusable-FFT-plan engine
+    // (Phases 6-7) is fast enough to analyse 600 s in ~2.3 s on a fast
+    // machine, so a 600 s fixture could finish BEFORE the break below and
+    // silently turn this cancellation test into a no-op. 3x the work keeps
+    // the child provably mid-flight.
+    write_wav(wav, 1800);
     const fs::path out = g_dir / "cli_cancel.png";
     const int base_ff = count_ffmpeg();
 
@@ -453,9 +457,13 @@ static void test_cli_cancel() {
                          CREATE_NEW_PROCESS_GROUP, nullptr, nullptr, &si, &pi),
           "spectragen child spawned");
     CloseHandle(pi.hThread);
-    // Decode plus heavy analysis run for tens of seconds; a short delay
-    // lands the break provably mid-flight (mid-analysis, post-decode).
-    std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+    // Decode plus heavy analysis take seconds; wait, then PROVE the child is
+    // still running before breaking it — a fixture too small for the machine
+    // must fail loudly instead of looking like a cancel that "passed".
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    DWORD live = 0;
+    GetExitCodeProcess(pi.hProcess, &live);
+    CHECK(live == STILL_ACTIVE, "child still running when the break is sent");
     CHECK(GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pi.dwProcessId), "break delivered");
     const DWORD wait = WaitForSingleObject(pi.hProcess, 30000);
     DWORD code = 0;

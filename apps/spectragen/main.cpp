@@ -96,6 +96,10 @@ static void print_usage() {
         "  --crf <0-51>                Quality (lower=better, default: 18)\n"
         "  --duration <seconds>        Time window for video frames (default: 5.0)\n"
         "  --freq-scale <scale>        linear | log | mel | bark | erb | cqt (default: log)\n"
+        "                              (display mapping only, never the representation)\n"
+        "  --representation <type>   stft | mel (default: stft)\n"
+        "  --mel-bands <n>             Mel filterbank bands 1..fft-bins (default: 64)\n"
+        "  --mel-norm <mode>           none | slaney | area (default: slaney)\n"
         "  --cqt-center <hz>           CQT center frequency (default: 440)\n"
         "  --cqt-q <factor>            CQT quality factor / bins per octave (default: 12)\n"
         "  --reassigned                Use time-frequency reassignment for improved resolution\n"
@@ -282,6 +286,32 @@ static int parse_args(int argc, char* argv[], CliConfig& cfg) {
                 cfg.freq_scale != "mel" && cfg.freq_scale != "bark" &&
                 cfg.freq_scale != "erb" && cfg.freq_scale != "cqt") {
                 std::cerr << "Error: --freq-scale must be linear, log, mel, bark, erb, or cqt\n";
+                return 1;
+            }
+            continue;
+        }
+        if (arg == "--representation") {
+            if (i + 1 >= argc) { std::cerr << "Error: " << arg << " requires a value\n"; return 1; }
+            cfg.representation = argv[++i];
+            if (cfg.representation != "stft" && cfg.representation != "mel") {
+                std::cerr << "Error: --representation must be stft or mel\n";
+                return 1;
+            }
+            continue;
+        }
+        if (arg == "--mel-bands") {
+            if (i + 1 >= argc) { std::cerr << "Error: " << arg << " requires a value\n"; return 1; }
+            auto r = CliParse::parse_int(argv[++i], 1, 8192, "--mel-bands");
+            if (!r.ok) { std::cerr << "Error: " << r.error << "\n"; return 1; }
+            cfg.mel_bands = static_cast<int>(r.value);
+            continue;
+        }
+        if (arg == "--mel-norm") {
+            if (i + 1 >= argc) { std::cerr << "Error: " << arg << " requires a value\n"; return 1; }
+            cfg.mel_norm = argv[++i];
+            if (cfg.mel_norm != "none" && cfg.mel_norm != "slaney" &&
+                cfg.mel_norm != "area") {
+                std::cerr << "Error: --mel-norm must be none, slaney, or area\n";
                 return 1;
             }
             continue;

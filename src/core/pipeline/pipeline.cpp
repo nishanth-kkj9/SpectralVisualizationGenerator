@@ -2,6 +2,8 @@
 
 #include "fft.h"
 #include "fft_plan.h"
+#include "mel_filterbank.h"
+#include "mel_renderer.h"
 #include "stft.h"
 #include "media_decoder.h"
 #include "spectrogram_renderer.h"
@@ -95,6 +97,21 @@ std::string validate_config(const GenerateConfig& cfg) {
         cfg.freq_scale != "mel" && cfg.freq_scale != "bark" &&
         cfg.freq_scale != "erb" && cfg.freq_scale != "cqt")
         return "freq-scale must be linear, log, mel, bark, erb, or cqt";
+    // Representation is WHAT is computed (freq_scale stays display-only).
+    if (cfg.representation != "stft" && cfg.representation != "mel")
+        return "representation must be stft or mel";
+    if (cfg.representation == "mel") {
+        if (cfg.reassigned)
+            return "reassigned requires STFT and cannot combine with mel";
+        if (cfg.mel_bands < 1 || cfg.mel_bands > cfg.fft_size / 2 + 1)
+            return "mel-bands must be within [1, fft-bins]";
+        if (cfg.mel_norm != "none" && cfg.mel_norm != "slaney" &&
+            cfg.mel_norm != "area")
+            return "mel-norm must be none, slaney, or area";
+        // Range-vs-Nyquist is enforced by the filterbank build with the
+        // real sample rate; min/max ordering for explicit maxima is
+        // already checked above.
+    }
     if (eff_video) {
         // Same bounds the encoder enforces; checked here so API callers
         // fail at validation instead of mid-encode.
@@ -168,11 +185,28 @@ ProjectConfig make_project_config(const GenerateConfig& cfg, const DecodedMedia&
     ProjectFreqScale sc = ProjectFreqScale::Logarithmic;
     try_parse_freq_scale(cfg.freq_scale, sc);  // unknown keeps Logarithmic, as before
     pc.frequency_range.scale = sc;
-    // Representation produced here is always conventional STFT today.
-    // Bins stay implied by fft_size; future Mel/CQT builders will set
-    // explicit counts through this same struct (never N/2+1 for them).
-    pc.analysis.representation = RepresentationInfo::stft_default();
-    pc.analysis.representation.reassignment_supported = cfg.reassigned;
+    // Representation contract: STFT leaves bins implied by fft_size;
+    // Mel carries explicit bands/norm/range (centers are computed data,
+    // built at analysis time, never N/2+1).
+    if (cfg.representation == "mel") {
+        RepresentationInfo rep;
+        rep.kind = RepresentationKind::Mel;
+        rep.bins = cfg.mel_bands;
+        rep.fmin_hz = cfg.min_freq;
+        rep.fmax_hz = cfg.max_freq;  // 0 = Nyquist, resolved at build
+        rep.bands = cfg.mel_bands;
+        rep.norm = cfg.mel_norm == "none"     ? RepresentationNorm::None
+                   : cfg.mel_norm == "area"   ? RepresentationNorm::Area
+                                              : RepresentationNorm::Slaney;
+        rep.phase = RepresentationPhase::NotApplicable;
+        rep.reassignment_supported = false;
+        pc.analysis.representation = rep;
+        pc.analysis.analysis_method = "mel";
+        pc.analysis.analysis_version = 1;
+    } else {
+        pc.analysis.representation = RepresentationInfo::stft_default();
+        pc.analysis.representation.reassignment_supported = cfg.reassigned;
+    }
     pc.renderer.kind = (cfg.visualization == "spectrogram") ? RendererKind::Spectrogram
                                                               : RendererKind::Spectrum;
     pc.renderer.width = cfg.width;
@@ -283,8 +317,38 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
                                               std::sin(2.0f * PI * static_cast<float>(j) /
                                                        static_cast<float>(fft_n - 1));
     }
+    // Representation dispatch: STFT builds FFT-bin frames; Mel aggregates
+    // the STFT contract's one-sided amplitude-corrected power through a
+    // triangular Mel filterbank into explicit bands. Streaming, windowing,
+    // FFT execution, cancel, and progress below are shared; only frame
+    // construction and metadata differ.
+    const bool is_mel =
+        pc.analysis.representation.kind == RepresentationKind::Mel;
+    MelFilterbank mel_bank;
+    std::vector<float> mel_energy;   // reused per-frame Mel energies
+    std::vector<float> power_scratch;  // reused per-frame FFT-bin power
+    if (is_mel) {
+        MelFilterbankConfig mcfg;
+        mcfg.sample_rate = sr;
+        mcfg.fft_size = fft_n;
+        mcfg.fmin_hz = cfg.min_freq;
+        mcfg.fmax_hz = cfg.max_freq;
+        mcfg.bands = cfg.mel_bands;
+        mcfg.norm = pc.analysis.representation.norm;
+        std::string mel_err;
+        if (!mel_bank.build(mcfg, mel_err)) {
+            decoder.close();
+            return Error::make(Subsystem::Pipeline, JobError::BadConfig,
+                               "config: " + mel_err);
+        }
+        mel_energy.assign(static_cast<size_t>(mel_bank.bands()), 0.0f);
+        power_scratch.assign(static_cast<size_t>(fft_n) / 2 + 1, 0.0f);
+        dataset.mutable_frequency_axis() =
+            FrequencyAxis::from_centers(mel_bank.centers_hz(), sr);
+    }
     // Frame-count estimate for progress (exact at EOF). total_frames() is
     // duration-derived until a clean EOF; never zero-divided, never >100%.
+    // Mel shares STFT framing, so the same estimate applies.
     const int64_t est_total = decoder.total_frames();
     const int est_frames = stft_frame_count(
         est_total > INT_MAX ? INT_MAX : static_cast<int>(est_total), fft_n, hop_n);
@@ -386,10 +450,75 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
 
             SpectralFrame sf;
             sf.frame_index = frame_idx;
-            sf.n_fft = fft_n;
+            sf.n_fft = fft_n;  // provenance: underlying STFT size (Mel bins
+                               // are authoritative for frequency meaning)
             sf.window_factor = cg;
             // Absolute timestamp policy (frame start / sample rate).
             sf.timestamp = static_cast<double>(abs_start) / static_cast<double>(sr);
+            if (is_mel) {
+                // Mel frame: the ONE authoritative aggregation input is the
+                // STFT contract's one-sided amplitude-corrected power
+                // (interior bins doubled, DC/Nyquist single, scale 1/(N*cg))
+                // — the identical quantity the STFT branch stores as
+                // sf.power[k]. Mel therefore shares STFT's amplitude domain,
+                // so reference_amplitude/db_floor rendering semantics carry
+                // over unchanged. Aggregating raw |X|^2 instead would carry
+                // the window's N*cg factor (~+55 dB) and saturate every
+                // renderer while claiming neutral window gains.
+                const int bands = mel_bank.bands();
+                const float norm = 1.0f / (static_cast<float>(fft_n) * cg);
+                for (int k = 0; k < num_bins; ++k) {
+                    const float re = spec[static_cast<size_t>(k)].real();
+                    const float im = spec[static_cast<size_t>(k)].imag();
+                    float mag = std::sqrt(re * re + im * im) * norm;
+                    if (k > 0 && k < fft_n / 2) mag *= 2.0f;
+                    power_scratch[static_cast<size_t>(k)] = mag * mag;
+                }
+                mel_bank.apply(power_scratch.data(), mel_energy.data());
+                sf.magnitudes.resize(static_cast<size_t>(bands));
+                sf.power.resize(static_cast<size_t>(bands));
+                // No phase, no reassignment for Mel (contract).
+                // Energies are weighted power accumulation (the filterbank
+                // contract); magnitudes are their amplitude-domain square
+                // root, so power == mag^2 holds in every representation.
+                // Statistics are defined over those stored band magnitudes
+                // and the ACTUAL Mel centers (never k*sr/N):
+                //   rms              = sqrt(mean_b mag_b^2)
+                //                      (RMS of the stored Mel magnitudes,
+                //                       i.e. sqrt of the mean band energy)
+                //   peak_magnitude   = max_b mag_b
+                //   centroid         = sum_b f_b*mag_b / sum_b mag_b
+                //   bandwidth        = sqrt(sum_b (f_b - centroid)^2*mag_b
+                //                           / sum_b mag_b)
+                float sum_sq = 0.0f, peak = 0.0f, cn = 0.0f, cd = 0.0f;
+                const std::vector<float>& centers = mel_bank.centers_hz();
+                for (int b = 0; b < bands; ++b) {
+                    const float energy = mel_energy[static_cast<size_t>(b)];
+                    const float mag =
+                        energy > 0.0f ? std::sqrt(energy) : 0.0f;
+                    sf.magnitudes[static_cast<size_t>(b)] = mag;
+                    sf.power[static_cast<size_t>(b)] = energy;
+                    sum_sq += mag * mag;
+                    if (mag > peak) peak = mag;
+                    cn += centers[static_cast<size_t>(b)] * mag;
+                    cd += mag;
+                }
+                sf.rms = std::sqrt(sum_sq / static_cast<float>(bands));
+                sf.peak_magnitude = peak;
+                sf.spectral_centroid = (cd > 0.0f) ? cn / cd : 0.0f;
+                if (cd > 0.0f) {
+                    double var = 0.0;
+                    for (int b = 0; b < bands; ++b) {
+                        const double d = centers[static_cast<size_t>(b)] -
+                                         sf.spectral_centroid;
+                        var += d * d * sf.magnitudes[static_cast<size_t>(b)];
+                    }
+                    sf.spectral_bandwidth =
+                        static_cast<float>(std::sqrt(var / cd));
+                } else {
+                    sf.spectral_bandwidth = 0.0f;
+                }
+            } else {
             sf.magnitudes.resize(static_cast<size_t>(num_bins));
             sf.phases.resize(static_cast<size_t>(num_bins));
             sf.power.resize(static_cast<size_t>(num_bins));
@@ -471,6 +600,7 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
                     }
                 }
             }
+            }  // else (STFT frame construction)
 
             dataset.add_frame(sf);
             ++frame_idx;
@@ -515,6 +645,18 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
         am.analyzer_version = "2";  // S4 amplitude-corrected one-sided STFT
         am.total_frames = dataset.frame_count();
         am.total_duration_seconds = dataset.total_duration();
+        // add_frame() stamps frame_duration_seconds while the time axis is
+        // still unbuilt (sample rate 0), leaving inf behind — correct it
+        // from the final axis, for both representations.
+        am.frame_duration_seconds = dataset.frame_duration();
+        if (is_mel) {
+            // Mel overrides: band count (never N/2+1), Mel algorithm
+            // version, and method provenance. fft_size/hop stay as the
+            // underlying STFT implementation parameters.
+            am.num_frequency_bins = mel_bank.bands();
+            am.analyzer_version = "1";  // Mel filterbank computation v1
+            am.analysis_method = "mel";
+        }
     }
     {
         auto& ci = dataset.mutable_channel_info();
@@ -529,16 +671,31 @@ Error analyze_dataset(const GenerateConfig& cfg_in, SpectralDataset& dataset,
     {
         // Dataset representation mirrors the canonical config, made
         // explicit: STFT bins are the produced count, range the Nyquist
-        // span, phase available, reassignment per the request.
+        // span, phase available, reassignment per the request. Mel carries
+        // the built filterbank contract instead: explicit bands/centers,
+        // no phase, no reassignment, neutral window gains (the window's
+        // effect is baked into the aggregated energies; re-applying STFT
+        // gains would double-count it).
         auto& rep = dataset.mutable_representation();
         rep = pc.analysis.representation;
-        rep.bins = dataset.num_frequency_bins();
-        rep.fmin_hz = 0.0f;
-        rep.fmax_hz = dataset.nyquist_frequency();
-        rep.phase = RepresentationPhase::Available;
         auto& nm = dataset.mutable_normalization_info();
-        nm.window_coherent_gain = pc.analysis.window_coherent_gain;
-        nm.window_energy_gain = pc.dynamic_range.window_energy_gain;
+        if (is_mel) {
+            rep.bins = mel_bank.bands();
+            rep.fmin_hz = mel_bank.fmin_hz();
+            rep.fmax_hz = mel_bank.fmax_hz();
+            rep.bin_centers = mel_bank.centers_hz();
+            rep.phase = RepresentationPhase::NotApplicable;
+            rep.reassignment_supported = false;
+            nm.window_coherent_gain = 1.0f;
+            nm.window_energy_gain = 1.0f;
+        } else {
+            rep.bins = dataset.num_frequency_bins();
+            rep.fmin_hz = 0.0f;
+            rep.fmax_hz = dataset.nyquist_frequency();
+            rep.phase = RepresentationPhase::Available;
+            nm.window_coherent_gain = pc.analysis.window_coherent_gain;
+            nm.window_energy_gain = pc.dynamic_range.window_energy_gain;
+        }
         nm.magnitude_scale = pc.analysis.magnitude_scale;
         nm.reference_amplitude = pc.dynamic_range.reference_amplitude;
         nm.db_floor = pc.dynamic_range.db_floor;
@@ -669,7 +826,7 @@ Error render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& datase
                                "encode: video render cancelled for '" + cfg.output_path + "'");
         if (verr == VideoRenderError::UnsupportedRepresentation)
             return Error::make(Subsystem::Encode, JobError::RenderError,
-                               "encode: video renderer supports STFT datasets only, got '" +
+                               "encode: video renderer supports STFT and Mel datasets only, got '" +
                                    std::string(representation_kind_name(
                                        dataset.representation().kind)) +
                                    "'");
@@ -688,6 +845,31 @@ Error render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& datase
                                "encode: video encode failed for '" + cfg.output_path + "'");
         }
     } else if (cfg.visualization == "spectrogram") {
+        // Representation-aware dispatch: Mel datasets render through the
+        // Mel renderer (explicit centers to pixels); STFT keeps its
+        // renderer untouched. The dataset kind decides, never the request.
+        if (dataset.representation().kind == RepresentationKind::Mel) {
+            SpectrogramConfig sc;
+            ProjectConfigAdapter::to_spectrogram_config(rpc, sc);
+            sc.freq_min_hz = fmin;
+            MelSpectrogramConfig mc;
+            mc.width = sc.width;
+            mc.height = sc.height;
+            mc.color_map = sc.color_map;
+            mc.db_floor = sc.db_floor;
+            mc.db_ceiling = sc.db_ceiling;
+            MelSpectrogramRenderer mel_renderer(mc);
+            const MelRenderError merr =
+                mel_renderer.render_to_png(dataset, tmp_path, cancel);
+            if (merr == MelRenderError::Cancelled)
+                return Error::make(Subsystem::Render, JobError::Cancelled,
+                                   "render: mel spectrogram cancelled for '" +
+                                       cfg.output_path + "'");
+            if (merr != MelRenderError::Ok)
+                return Error::make(Subsystem::Render, JobError::RenderError,
+                                   "render: mel spectrogram failed for '" +
+                                       cfg.output_path + "'");
+        } else {
         SpectrogramConfig sc;
         ProjectConfigAdapter::to_spectrogram_config(rpc, sc);
         sc.freq_min_hz = fmin;
@@ -728,6 +910,7 @@ Error render_dataset(const GenerateConfig& cfg_in, const SpectralDataset& datase
                 return Error::make(Subsystem::Render, JobError::RenderError,
                                    "render: spectrogram failed for '" + cfg.output_path + "'");
         }
+        }  // else (STFT spectrogram path; Mel handled above)
     } else {
         SpectrumConfig sc;
         ProjectConfigAdapter::to_spectrum_config(rpc, sc);

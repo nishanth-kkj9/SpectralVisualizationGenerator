@@ -325,14 +325,34 @@ static void test_refusals() {
               "spectrum refuses mel");
     }
     {
+        // Phase 9: video became representation-aware — a Mel dataset renders
+        // through the Mel renderer (explicit centers to pixels) instead of
+        // being refused. The STFT-only guard itself is unchanged and still
+        // rejects every other kind (Bark probed below).
         VideoRenderer vr;
-        CHECK(vr.render(mel, "phase8_refuse_tmp.mp4") ==
-                  VideoRenderError::UnsupportedRepresentation,
-              "video refuses mel");
         RGBAImage frame;
-        CHECK(vr.render_frame(mel, 0.0, frame) ==
+        CHECK(vr.render_frame(mel, 0.0, frame) == VideoRenderError::Ok,
+              "video frame renders mel via the mel renderer");
+        CHECK(frame.valid(), "mel video frame produced an image");
+        SpectralDataset bark = mel;
+        bark.mutable_representation().kind = RepresentationKind::Bark;
+        RGBAImage refused;
+        CHECK(vr.render_frame(bark, 0.0, refused) ==
                   VideoRenderError::UnsupportedRepresentation,
-              "video frame refuses mel");
+              "video frame refuses other non-stft kinds");
+        CHECK(!refused.valid(), "no partial image for a refused video frame");
+    }
+    {
+        // Encoding Mel frames needs ffmpeg; skip like the codebase's other
+        // video tests do.
+        if (VideoEncoder::ffmpeg_available()) {
+            VideoRenderer vr;
+            CHECK(vr.render(mel, "phase8_mel_tmp.mp4") == VideoRenderError::Ok,
+                  "video encodes mel");
+            std::remove("phase8_mel_tmp.mp4");
+        } else {
+            std::printf("  (ffmpeg missing: mel video encode skipped)\n");
+        }
     }
     {
         // Binary is STFT-only: non-STFT fails closed, never mislabeled.

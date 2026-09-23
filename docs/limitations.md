@@ -15,6 +15,19 @@
 - **Legal**: Qt license selection and FFmpeg bundling rules unresolved —
   see `docs/licensing.md`. Do not redistribute Qt DLLs or GPL FFmpeg builds
   without completing that review.
+- **Only one filterbank representation**: Mel (triangular filterbank over
+  STFT power) is implemented; Bark, ERB and CQT exist as display scales only.
+  CQT is not a representation at all yet.
+- **Non-STFT datasets are JSON-only**: the dataset binary format (v3) is
+  STFT-only by contract and fails closed for Mel data (a v4 binary is a
+  deliberate future decision), so Mel datasets persist and reload through
+  JSON.
+- **GPU is STFT-rendering only**: no GPU Mel computation or rendering, and
+  none is claimed; `--gpu` has no effect on a Mel run (CPU Mel renderer).
+- **Mel bands are coarser than FFT bins by design**: Mel centroid/bandwidth
+  and pixel rows resolve only to the Mel center grid, so Mel images are
+  intentionally lower-resolution in frequency than an STFT image of the same
+  FFT size.
 - GUI has no cancel button for in-flight jobs (CLI supports Ctrl-C).
 - **Output replacement is crash-safe, not power-safe**: new bytes go to a
   uniquely named `<stem>.<pid>.<ctr>.part<ext>` temp file beside the

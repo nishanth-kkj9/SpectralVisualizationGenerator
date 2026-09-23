@@ -49,7 +49,13 @@ struct GenerateConfig {
     std::string freq_scale = "log";
     float cqt_center = 440.0f;
     float cqt_q = 12.0f;
-    bool reassigned = false;
+    // Spectral representation: "stft" (default) or "mel". Mel aggregates
+    // STFT power through a triangular Mel filterbank into explicit bands
+    // (never relabelled FFT bins); freq_scale stays display-only.
+    std::string representation = "stft";
+    int mel_bands = 64;
+    std::string mel_norm = "slaney";  // none | slaney | area
+    bool reassigned = false;  // STFT-only; rejected with mel
     bool use_gpu = false;  // spectrogram render_gpu() with CPU fallback
 };
 

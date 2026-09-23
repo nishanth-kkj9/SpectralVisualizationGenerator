@@ -22,6 +22,7 @@ add_library(SpectralCore STATIC
     src/core/rendering/d3d11_context.cpp
     src/core/rendering/gpu_spectrogram.cpp
     src/core/rendering/png_encoder.cpp
+    src/core/rendering/mel_renderer.cpp
     src/core/rendering/spectrogram_renderer.cpp
     src/core/rendering/spectrum_renderer.cpp
     src/core/spectral/multiband_analyzer.cpp
@@ -163,6 +164,7 @@ add_executable(spectral_benchmarks
     src/benchmarks/main.cpp
     src/benchmarks/bench_fft.cpp
     src/benchmarks/bench_stft.cpp
+    src/benchmarks/bench_mel.cpp
     src/benchmarks/bench_dataset_serialization.cpp
     src/benchmarks/bench_image_rendering.cpp
     src/benchmarks/bench_png_encoding.cpp
@@ -274,6 +276,31 @@ set_target_properties(test_fft_plan PROPERTIES
     WIN32_EXECUTABLE OFF
 )
 add_test(NAME fft_plan COMMAND test_fft_plan)
+
+add_executable(test_mel_filterbank
+    tests/dsp/test_mel_filterbank.cpp
+)
+target_include_directories(test_mel_filterbank PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core/dsp>
+)
+target_link_libraries(test_mel_filterbank PRIVATE SpectralCore)
+set_target_properties(test_mel_filterbank PROPERTIES
+    CXX_VISIBILITY_PRESET "hidden"
+    CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
+    WIN32_EXECUTABLE OFF
+)
+add_test(NAME mel_filterbank COMMAND test_mel_filterbank)
+
+add_executable(test_mel_analysis
+    tests/cli/test_mel_analysis.cpp
+)
+target_link_libraries(test_mel_analysis PRIVATE SpectralCore)
+set_target_properties(test_mel_analysis PROPERTIES
+    CXX_VISIBILITY_PRESET "hidden"
+    CXX_RUNTIME_LIBRARY "MultiThreadedDLL"
+    WIN32_EXECUTABLE OFF
+)
+add_test(NAME mel_analysis COMMAND test_mel_analysis)
 
 add_executable(test_dsp_accuracy
     tests/dsp/test_dsp_accuracy.cpp

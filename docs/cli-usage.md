@@ -10,7 +10,19 @@ hann|hamming|blackman|rectangular`, `--overlap`, `--min-frequency`,
 `--max-frequency`, `--db-range`, `--resolution WxH`, `--output-format
 image|video` (auto from extension), `--fps`, `--codec`, `--crf`,
 `--duration`, `--freq-scale linear|log|mel|bark|erb|cqt`, `--cqt-center`,
-`--cqt-q`, `--reassigned`, `--multiband`, `--gpu`, `-h`, `-V`.
+`--cqt-q`, `--representation stft|mel`, `--mel-bands`, `--mel-norm`,
+`--reassigned`, `--multiband`, `--gpu`, `-h`, `-V`.
+
+`--representation` selects WHAT is computed: `stft` (FFT bins, default) or
+`mel` (real triangular Mel filterbank bands). `--mel-bands <n>` (1..fft-bins,
+default 64) and `--mel-norm none|slaney|area` (default `slaney`) configure the
+filterbank and are rejected outside a Mel run. `--freq-scale` is purely
+display mapping and never changes the representation. `--reassigned` is
+STFT-only and fails when combined with `--representation mel`; Mel data is
+phaseless by contract. `--gpu` covers the STFT spectrogram renderer only —
+a Mel run renders on the CPU with identical geometry. Mel datasets persist
+through JSON (`--output-format` videos render through the Mel renderer); the
+dataset binary format stays STFT-only.
 
 Exit codes: 0 ok · 1 bad args · 2 file not found · 3 decode error ·
 4 analysis error · 5 render error · 6 missing dependency · 7 cancelled.

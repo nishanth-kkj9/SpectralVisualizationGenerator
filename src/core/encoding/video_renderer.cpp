@@ -1,5 +1,7 @@
 #include "video_renderer.h"
 
+#include "mel_renderer.h"
+
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -17,7 +19,10 @@ VideoRenderError VideoRenderer::render_frame(const SpectralDataset& dataset,
                                              RGBAImage& out) const {
     out.clear();
     if (dataset.frame_count() == 0) return VideoRenderError::EmptyDataset;
-    if (!dataset.representation().is_stft())
+    // render() already refused every kind except STFT/Mel; render_frame
+    // mirrors that contract for direct callers.
+    if (dataset.representation().kind != RepresentationKind::STFT &&
+        dataset.representation().kind != RepresentationKind::Mel)
         return VideoRenderError::UnsupportedRepresentation;
 
     const int W = cfg_.width;
@@ -101,6 +106,22 @@ VideoRenderError VideoRenderer::render_frame(const SpectralDataset& dataset,
     sc.db_floor = cfg_.db_floor;
     sc.db_ceiling = cfg_.db_ceiling;
 
+    // Render through the representation-aware entry point: STFT keeps
+    // its renderer untouched, Mel uses explicit centers to pixels.
+    // (render() already refused every other kind above.)
+    if (dataset.representation().kind == RepresentationKind::Mel) {
+        MelSpectrogramConfig mc;
+        mc.width = W;
+        mc.height = H;
+        mc.color_map = parse_color_map(cfg_.color_map_name);
+        mc.db_floor = cfg_.db_floor;
+        mc.db_ceiling = cfg_.db_ceiling;
+        MelSpectrogramRenderer mel_renderer(mc);
+        if (mel_renderer.render(subset, out) != MelRenderError::Ok)
+            return VideoRenderError::EmptyDataset;
+        return VideoRenderError::Ok;
+    }
+
     SpectrogramRenderer renderer(sc);
     auto err = renderer.render(subset, out);
     if (err != RenderError::Ok) return VideoRenderError::EmptyDataset;
@@ -112,9 +133,11 @@ VideoRenderError VideoRenderer::render(const SpectralDataset& dataset,
                                        const std::string& output_path,
                                        const std::atomic<bool>* cancel) const {
     if (dataset.frame_count() == 0) return VideoRenderError::EmptyDataset;
-    // Video frames are STFT spectrogram slices; refuse anything else
-    // rather than encoding misleading pictures.
-    if (!dataset.representation().is_stft())
+    // Video frames are spectrogram slices: STFT through the STFT renderer,
+    // Mel through the Mel renderer (explicit centers to pixels). Anything
+    // else is refused rather than encoded as misleading pictures.
+    if (dataset.representation().kind != RepresentationKind::STFT &&
+        dataset.representation().kind != RepresentationKind::Mel)
         return VideoRenderError::UnsupportedRepresentation;
 
     // Open encoder

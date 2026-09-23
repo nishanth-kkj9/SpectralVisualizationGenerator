@@ -411,20 +411,36 @@ void SpectralDataset::validate_dimensions(ValidationResult& r) const {
         validate_representation(representation_, analysis_meta_.fft_size, rep_errs);
         for (const auto& e : rep_errs) r.add_error("representation: " + e);
     }
-    // Explicit representation range must match the actual axis centers.
-    // (Implied 0/0 ranges skip this: STFT means full grid by construction.)
+    // Explicit representation range must agree with the actual axis centers.
+    // The meaning differs per kind and both are checked strictly:
+    //  - STFT: the range IS the kept center span (Phase 8 contract), so the
+    //    ends must match the first/last axis centers.
+    //  - Filterbank (Mel et al.): the range is coverage — first left edge to
+    //    last right edge — so the centers must lie INSIDE it (a strict
+    //    subset); equality would be the wrong relation to demand here.
+    // (Implied 0/0 ranges skip both: STFT means the full grid by
+    // construction, so an implied range carries no claim to check.)
     if (!freq_axis_.bin_frequencies.empty()) {
         const float first = freq_axis_.bin_frequencies.front();
         const float last = freq_axis_.bin_frequencies.back();
-        if (representation_.fmin_hz > 0.0f &&
-            std::fabs(first - representation_.fmin_hz) >
-                1e-3f * (std::fabs(representation_.fmin_hz) + 1.0f)) {
-            r.add_error("representation.fmin_hz != first axis center");
-        }
-        if (representation_.fmax_hz > 0.0f &&
-            std::fabs(last - representation_.fmax_hz) >
-                1e-3f * (std::fabs(representation_.fmax_hz) + 1.0f)) {
-            r.add_error("representation.fmax_hz != last axis center");
+        if (representation_.is_stft()) {
+            if (representation_.fmin_hz > 0.0f &&
+                std::fabs(first - representation_.fmin_hz) >
+                    1e-3f * (std::fabs(representation_.fmin_hz) + 1.0f)) {
+                r.add_error("representation.fmin_hz != first axis center");
+            }
+            if (representation_.fmax_hz > 0.0f &&
+                std::fabs(last - representation_.fmax_hz) >
+                    1e-3f * (std::fabs(representation_.fmax_hz) + 1.0f)) {
+                r.add_error("representation.fmax_hz != last axis center");
+            }
+        } else {
+            if (representation_.fmin_hz > 0.0f && first + 1e-3f < representation_.fmin_hz) {
+                r.add_error("representation.fmin_hz above first axis center");
+            }
+            if (representation_.fmax_hz > 0.0f && last - 1e-3f > representation_.fmax_hz) {
+                r.add_error("representation.fmax_hz below last axis center");
+            }
         }
     }
     // Phase normalization without phase capability is meaningless.

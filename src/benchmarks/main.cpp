@@ -8,6 +8,7 @@
 // Forward declarations from bench_*.cpp files
 bench::Result bench_fft(int sample_rate, int fft_size, int duration_sec);
 bench::Result bench_stft(int sample_rate, int fft_size, int duration_sec);
+bench::Result bench_mel(int sample_rate, int fft_size, int duration_sec);
 bench::Result bench_dataset_serialization(int sample_rate, int fft_size, int duration_sec);
 bench::Result bench_image_rendering(int sample_rate, int fft_size, int duration_sec);
 bench::Result bench_image_rendering_1920(int sample_rate, int fft_size, int duration_sec);
@@ -99,6 +100,7 @@ int main(int argc, char* argv[]) {
                 int dur = dur_ptr[d_idx];
                 run_if("fft", [&]() { return bench_fft(sr, fs, dur); });
                 run_if("stft", [&]() { return bench_stft(sr, fs, dur); });
+                run_if("mel", [&]() { return bench_mel(sr, fs, dur); });
                 run_if("dataset_serialization", [&]() { return bench_dataset_serialization(sr, fs, dur); });
                 run_if("streaming_analysis", [&]() { return bench_streaming_analysis(sr, fs, dur); });
             }
