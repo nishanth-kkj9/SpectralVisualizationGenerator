@@ -36,7 +36,7 @@ enum class VideoRenderError {
     EncoderWriteFailed,
     EncoderCloseFailed,
     Cancelled,  // caller-requested cancellation; encoder terminated
-    UnsupportedRepresentation,  // only STFT datasets can be rendered
+    UnsupportedRepresentation,  // only STFT and Mel datasets can be rendered
 };
 
 class VideoRenderer {

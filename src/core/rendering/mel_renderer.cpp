@@ -65,8 +65,19 @@ MelRenderError MelSpectrogramRenderer::render(const SpectralDataset& dataset,
             return MelRenderError::Cancelled;
         }
         // Row 0 (top) = highest band; row H-1 (bottom) = band 0.
-        int band = (Nb == 1) ? 0 : static_cast<int>((1.0 - static_cast<double>(y) / (H - 1)) *
-                                                   (Nb - 1) + 0.5);
+        // H == 1 has no pair of extremes to interpolate between, so it maps
+        // to one deterministic band (the middle of the representation). H > 1
+        // keeps the historical stretched mapping exactly.
+        int band = 0;
+        if (Nb == 1) {
+            band = 0;
+        } else if (H == 1) {
+            band = (Nb - 1) / 2;
+        } else {
+            band = static_cast<int>((1.0 - static_cast<double>(y) / (H - 1)) *
+                                        (Nb - 1) +
+                                    0.5);
+        }
         if (band < 0) band = 0;
         if (band >= Nb) band = Nb - 1;
         for (int x = 0; x < W; ++x) {

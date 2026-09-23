@@ -219,6 +219,51 @@ static void test_nonstft_invalid() {
         CHECK(!d.validate().valid, "mel bins=0 rejected");
     }
     {
+        // The real Mel contract pins bands explicitly and agrees with bins.
+        auto d = make_mel_like();
+        d.mutable_representation().bands = 0;
+        CHECK(!d.validate().valid, "mel bands=0 rejected");
+    }
+    {
+        auto d = make_mel_like();
+        d.mutable_representation().bins = 32;  // bands stay 64
+        CHECK(!d.validate().valid, "mel bins!=bands rejected");
+    }
+    {
+        auto d = make_mel_like();
+        d.mutable_representation().reassignment_supported = true;
+        CHECK(!d.validate().valid, "mel reassignment rejected");
+    }
+    {
+        auto d = make_mel_like();
+        d.mutable_representation().norm = static_cast<RepresentationNorm>(99);
+        CHECK(!d.validate().valid, "mel invalid norm rejected");
+    }
+    {
+        // Duplicate (non-strictly-increasing) centers are invalid Mel
+        // geometry, even though the generic axis order check would pass.
+        auto d = make_mel_like();
+        auto& c = d.mutable_representation().bin_centers;
+        c[10] = c[11];
+        CHECK(!d.validate().valid, "mel duplicate centers rejected");
+    }
+    {
+        auto d = make_mel_like();
+        auto& c = d.mutable_representation().bin_centers;
+        c[20] = -5.0f;
+        CHECK(!d.validate().valid, "mel negative centers rejected");
+    }
+    {
+        auto d = make_mel_like();
+        auto& c = d.mutable_representation().bin_centers;
+        c.pop_back();  // size no longer equals bins
+        CHECK(!d.validate().valid, "mel short centers rejected");
+    }
+    {
+        // Valid Mel metadata (the fixture itself) still passes.
+        CHECK(make_mel_like().validate().valid, "valid mel still passes");
+    }
+    {
         auto d = make_mel_like();
         auto& c = d.mutable_frequency_axis().bin_frequencies;
         std::swap(c[10], c[40]);  // unordered centers

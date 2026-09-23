@@ -669,6 +669,9 @@ void retarget_frequency_bins(FrequencyAxis& ax, RepresentationInfo& rep,
         rep.bins = 0;
     } else if (rep.bins != 0) {
         rep.bins = n;
+        // Mel binds bands to bins (validated as bins == bands); keep them
+        // in step so slicing a Mel dataset stays a valid Mel dataset.
+        if (rep.kind == RepresentationKind::Mel && rep.bands != 0) rep.bands = n;
     }
     if (!ax.bin_frequencies.empty()) {
         rep.fmin_hz = ax.bin_frequencies.front();

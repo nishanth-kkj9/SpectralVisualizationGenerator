@@ -6,6 +6,7 @@
 // filterbank) so production is never tested only against itself.
 #include "media_decoder.h"
 #include "mel_filterbank.h"
+#include "mel_renderer.h"
 #include "pipeline.h"
 #include "stft.h"
 
@@ -534,6 +535,83 @@ static void test_render_fingerprint_serial() {
         } else {
             CHECK(err == Spectral::JobError::Ok, "mel video job ok");
             CHECK(fs::exists(g_dir / "mel.mp4"), "mel video produced");
+        }
+    }
+    {
+        // Single-row/single-column edge geometry (H==1 divides by (H-1) in
+        // the naive row map): every positive size must render safely with a
+        // deterministic result, never NaN/UB.
+        Spectral::SpectralDataset ds;
+        CHECK(Spectral::analyze_dataset(cfg, ds).ok(), "edge geometry analyzes");
+        CHECK(ds.frame_count() > 0, "edge geometry has frames");
+        auto edge_ok = [&](int w, int h) {
+            Spectral::MelSpectrogramConfig mc;
+            mc.width = w;
+            mc.height = h;
+            Spectral::MelSpectrogramRenderer r(mc);
+            Spectral::RGBAImage img;
+            if (r.render(ds, img) != Spectral::MelRenderError::Ok) return false;
+            if (img.width != w || img.height != h) return false;
+            if (img.pixels.size() != static_cast<size_t>(w) * h * 4) return false;
+            for (float v : ds.frame(0).magnitudes)
+                if (!std::isfinite(v)) return false;
+            return img.valid();
+        };
+        CHECK(edge_ok(1, 1), "mel renders 1x1");
+        CHECK(edge_ok(1, 64), "mel renders 1xN");
+        CHECK(edge_ok(64, 1), "mel renders Nx1");
+        CHECK(edge_ok(64, 32), "mel renders normal dims");
+        {
+            // Single row selects the deterministic middle band for every
+            // column: the same band the production single-row path uses.
+            Spectral::MelSpectrogramConfig mc;
+            mc.width = 4;
+            mc.height = 1;
+            Spectral::MelSpectrogramRenderer r(mc);
+            Spectral::RGBAImage img;
+            CHECK(r.render(ds, img) == Spectral::MelRenderError::Ok,
+                  "Nx1 direct render ok");
+            const int nb = ds.num_frequency_bins();
+            const int mid = (nb - 1) / 2;
+            const float mag = ds.frame(0).magnitudes[static_cast<size_t>(mid)];
+            const float ref = ds.normalization_info().reference_amplitude > 0.0f
+                                  ? ds.normalization_info().reference_amplitude
+                                  : mc.reference_amplitude;
+            const float db = (!(mag > 0.0f) || !(ref > 0.0f))
+                                 ? mc.db_floor
+                                 : 20.0f * std::log10(mag / ref);
+            const float t = Spectral::SpectrogramRenderer::normalize_db(
+                db, mc.db_floor, mc.db_ceiling);
+            uint8_t er = 0, eg = 0, eb = 0;
+            Spectral::SpectrogramRenderer::color_map(mc.color_map, t, er, eg, eb);
+            bool match = true;
+            for (int x = 0; x < 4; ++x) {
+                const uint8_t* p = &img.pixels[static_cast<size_t>(x) * 4];
+                if (p[0] != er || p[1] != eg || p[2] != eb || p[3] != 255) {
+                    match = false;
+                    break;
+                }
+            }
+            CHECK(match, "Nx1 row is the deterministic middle band");
+        }
+        {
+            // The same tiny geometry through the normal run_job() image path.
+            auto tiny = cfg;
+            tiny.width = 1;
+            tiny.height = 1;
+            tiny.output_path = (g_dir / "mel_tiny.png").string();
+            fs::remove(tiny.output_path);
+            CHECK(Spectral::run_job(tiny) == Spectral::JobError::Ok,
+                  "1x1 image job ok");
+            CHECK(fs::exists(tiny.output_path), "1x1 image produced");
+            auto wide = cfg;
+            wide.width = 64;
+            wide.height = 1;
+            wide.output_path = (g_dir / "mel_wide1.png").string();
+            fs::remove(wide.output_path);
+            CHECK(Spectral::run_job(wide) == Spectral::JobError::Ok,
+                  "Nx1 image job ok");
+            CHECK(fs::exists(wide.output_path), "Nx1 image produced");
         }
     }
     {

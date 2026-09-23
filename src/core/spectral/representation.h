@@ -10,10 +10,10 @@
 // Nothing here computes spectra; it only describes them so future
 // Mel/Bark/ERB/CQT algorithms have an unambiguous contract to fill.
 
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <vector>
-
 namespace Spectral {
 
 // What was computed. Values are stable (persisted + fingerprinted).
@@ -131,6 +131,26 @@ inline bool validate_representation(const RepresentationInfo& r, int fft_size,
             errors.push_back("representation.kind is not a known kind");
             return false;
     }
+    switch (r.norm) {
+        case RepresentationNorm::None:
+        case RepresentationNorm::Slaney:
+        case RepresentationNorm::Area:
+            break;
+        default:
+            errors.push_back("representation.norm is not a known normalization");
+            return false;
+    }
+    switch (r.phase) {
+        case RepresentationPhase::Available:
+        case RepresentationPhase::NotApplicable:
+            break;
+        default:
+            errors.push_back("representation.phase is not a known capability");
+            return false;
+    }
+    if (!std::isfinite(r.fmin_hz) || !std::isfinite(r.fmax_hz)) {
+        errors.push_back("representation frequency bounds must be finite");
+    }
     if (r.version == 0) {
         errors.push_back("representation.version must be > 0");
     }
@@ -142,6 +162,46 @@ inline bool validate_representation(const RepresentationInfo& r, int fft_size,
     }
     if (r.fmax_hz > 0.0f && r.fmin_hz >= r.fmax_hz) {
         errors.push_back("representation.fmin_hz must be below fmax_hz");
+    }
+    if (r.kind == RepresentationKind::Mel) {
+        // Real Mel filterbank contract (this phase's implementation):
+        // explicit band count, agreed bins, phaseless magnitudes, no
+        // reassignment, and ordered finite centers when present. 0/0 stays
+        // the auto range (fmax resolved to Nyquist at build time).
+        if (r.bins <= 0) {
+            errors.push_back("mel representation requires explicit bins > 0");
+        }
+        if (r.bands <= 0) {
+            errors.push_back("mel representation requires bands > 0");
+        }
+        if (r.bins > 0 && r.bands > 0 && r.bins != r.bands) {
+            errors.push_back("mel representation requires bins == bands");
+        }
+        if (r.phase != RepresentationPhase::NotApplicable) {
+            errors.push_back("mel representation requires phase NotApplicable");
+        }
+        if (r.reassignment_supported) {
+            errors.push_back("mel representation does not support reassignment");
+        }
+        if (r.fmax_hz > 0.0f && r.fmin_hz >= r.fmax_hz) {
+            errors.push_back("mel representation requires fmin_hz below fmax_hz");
+        }
+        if (!r.bin_centers.empty()) {
+            if (static_cast<int>(r.bin_centers.size()) != r.bins) {
+                errors.push_back("mel bin_centers size must equal bins");
+            }
+            for (size_t i = 0; i < r.bin_centers.size(); ++i) {
+                if (!std::isfinite(r.bin_centers[i]) || r.bin_centers[i] < 0.0f) {
+                    errors.push_back("mel bin_centers must be finite and >= 0");
+                    break;
+                }
+                if (i > 0 && !(r.bin_centers[i] > r.bin_centers[i - 1])) {
+                    errors.push_back("mel bin_centers must be strictly increasing");
+                    break;
+                }
+            }
+        }
+        return errors.empty();
     }
     if (r.is_stft()) {
         // STFT bins are implied by the FFT grid when unset; an explicit
