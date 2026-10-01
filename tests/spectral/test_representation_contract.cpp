@@ -3,6 +3,7 @@
 // and validates; synthetic non-STFT fixtures (NOT real Mel/CQT algorithms)
 // prove generic code never assumes N/2+1, uniform spacing, phase, or
 // reassignment; STFT-only operations refuse anything else explicitly.
+#include "mel_filterbank.h"
 #include "representation.h"
 #include "spectral_dataset.h"
 #include "spectrogram_renderer.h"
@@ -143,6 +144,61 @@ static SpectralDataset make_cqt_like() {
         fr.timestamp = static_cast<double>(f * 512) / kSr;
         fr.magnitudes.assign(bands, 0.15f);
         fr.power.assign(bands, 0.0225f);
+        d.add_frame(fr);
+    }
+    return d;
+}
+
+// Real Mel-shaped fixture: a genuine triangular Mel filterbank built by the
+// same production builder the pipeline uses, so the declared coverage below
+// is the actual first-left / last-right filter edge rather than an arbitrary
+// number. Every center lies strictly inside that coverage, which is what
+// makes a "coverage := retained center span" regression detectable.
+// (make_mel_like() above is an explicit contract probe, not a filterbank;
+// these transform tests need real filter semantics.)
+static SpectralDataset make_real_mel() {
+    MelFilterbankConfig mc;
+    mc.sample_rate = kSr;
+    mc.fft_size = kFft;
+    mc.fmin_hz = 80.0f;
+    mc.fmax_hz = 7000.0f;
+    mc.bands = 24;
+    mc.norm = RepresentationNorm::Slaney;
+    MelFilterbank bank;
+    std::string err;
+    if (!bank.build(mc, err)) return SpectralDataset{};
+
+    SpectralDataset d;
+    d.mutable_frequency_axis() = FrequencyAxis::from_centers(bank.centers_hz(), kSr);
+    auto& am = d.mutable_analysis_metadata();
+    am.fft_size = kFft;
+    am.hop_size = kHop;
+    am.sample_rate = kSr;
+    am.num_frequency_bins = bank.bands();
+    am.nyquist_frequency = kSr / 2.0f;
+    am.analysis_method = "mel";
+    auto& rep = d.mutable_representation();
+    rep.kind = RepresentationKind::Mel;
+    rep.bins = bank.bands();
+    rep.fmin_hz = bank.fmin_hz();  // first filter's left coverage edge
+    rep.fmax_hz = bank.fmax_hz();  // last filter's right coverage edge
+    rep.bands = bank.bands();
+    rep.norm = RepresentationNorm::Slaney;
+    rep.phase = RepresentationPhase::NotApplicable;
+    rep.reassignment_supported = false;
+    rep.bin_centers = bank.centers_hz();
+    d.mutable_time_axis() = TimeAxis(0, kHop, kSr);
+    for (int f = 0; f < 2; ++f) {
+        SpectralFrame fr;
+        fr.frame_index = f;
+        fr.n_fft = 0;  // no FFT size for filterbank data
+        fr.timestamp = static_cast<double>(f * kHop) / kSr;
+        fr.magnitudes.assign(static_cast<size_t>(bank.bands()), 0.2f * (f + 1));
+        fr.power.assign(static_cast<size_t>(bank.bands()), 0.0f);
+        for (int b = 0; b < bank.bands(); ++b)
+            fr.power[static_cast<size_t>(b)] =
+                fr.magnitudes[static_cast<size_t>(b)] *
+                fr.magnitudes[static_cast<size_t>(b)];
         d.add_frame(fr);
     }
     return d;
@@ -487,12 +543,110 @@ static void test_serialization_roundtrip() {
     }
 }
 
+// Mel filterbank coverage must survive band selection. filter_band() and
+// downsample_frequency() drop bands of the SAME filterbank, so every retained
+// band keeps its original support and the declared coverage edges are
+// unchanged. Rewriting fmin_hz/fmax_hz to the retained center span (the
+// pre-fix behavior) relabels a filter center as a coverage edge — claiming
+// coverage the retained filters do not have. These assertions inspect the
+// metadata itself, not merely validate(), and each one fails on that behavior.
+static void test_mel_transform_coverage() {
+    std::printf("[mel_transform_coverage]\n");
+    const SpectralDataset mel = make_real_mel();
+    CHECK(mel.validate().valid, "real mel fixture validates");
+    CHECK(mel.num_frequency_bins() == 24, "fixture band count");
+    const float cov_min = mel.representation().fmin_hz;
+    const float cov_max = mel.representation().fmax_hz;
+    CHECK(cov_min == 80.0f && cov_max == 7000.0f,
+          "fixture coverage = first-left .. last-right filter edge");
+    CHECK(cov_min < mel.representation().bin_centers.front(),
+          "coverage starts below the first center");
+    CHECK(cov_max > mel.representation().bin_centers.back(),
+          "coverage ends above the last center");
+
+    // --- filter_band(): contiguous band selection --------------------------
+    {
+        const std::vector<float>& c = mel.representation().bin_centers;
+        const SpectralDataset s = mel.filter_band(c[5], c[11]);
+        const RepresentationInfo& rep = s.representation();
+        CHECK(s.num_frequency_bins() == 7, "slice keeps bands 5..11");
+        CHECK(s.validate().valid, "mel slice validates");
+        CHECK(rep.kind == RepresentationKind::Mel, "slice keeps kind");
+        CHECK(rep.bins == 7, "slice bins = retained bands");
+        CHECK(rep.bands == 7, "slice bands stay synchronized with bins");
+        CHECK(rep.bin_centers == std::vector<float>(c.begin() + 5, c.begin() + 12),
+              "slice centers are exactly the retained centers");
+        CHECK(rep.fmin_hz == cov_min, "slice preserves coverage floor");
+        CHECK(rep.fmax_hz == cov_max, "slice preserves coverage ceiling");
+        CHECK(rep.fmin_hz != rep.bin_centers.front() &&
+                  rep.fmax_hz != rep.bin_centers.back(),
+              "slice does not relabel retained centers as coverage edges");
+        CHECK(rep.fmin_hz < rep.bin_centers.front() &&
+                  rep.fmax_hz > rep.bin_centers.back(),
+              "retained centers stay inside the preserved coverage");
+        CHECK(rep.phase == RepresentationPhase::NotApplicable,
+              "slice stays phase N/A");
+        CHECK(!rep.reassignment_supported, "slice keeps reassignment off");
+        for (int f = 0; f < s.frame_count(); ++f)
+            CHECK(s.frame(f).phases.empty(), "slice frames stay phaseless");
+        // JSON must carry the corrected metadata, not "repair" it.
+        SpectralDataset loaded;
+        CHECK(loaded.deserialize_json(s.serialize_json()), "sliced mel json loads");
+        CHECK(loaded.representation() == rep,
+              "sliced mel representation round-trips");
+        CHECK(loaded.validate().valid, "loaded sliced mel validates");
+        CHECK(loaded.representation().fmin_hz == cov_min &&
+                  loaded.representation().fmax_hz == cov_max,
+              "round-trip keeps coverage, not the center span");
+    }
+
+    // --- downsample_frequency(): strided band selection --------------------
+    {
+        const std::vector<float>& c = mel.representation().bin_centers;
+        const SpectralDataset s = mel.downsample_frequency(3);
+        const RepresentationInfo& rep = s.representation();
+        std::vector<float> keep;
+        for (size_t k = 0; k < c.size(); k += 3) keep.push_back(c[k]);
+        CHECK(keep.size() == 8, "stride-3 keeps 8 of 24 bands");
+        CHECK(s.validate().valid, "mel decimation validates");
+        CHECK(rep.bins == 8, "decimated bins");
+        CHECK(rep.bands == 8, "decimated bands stay synchronized with bins");
+        CHECK(rep.bin_centers == keep, "decimated centers are the strided centers");
+        CHECK(rep.fmin_hz == cov_min, "decimation preserves coverage floor");
+        CHECK(rep.fmax_hz == cov_max, "decimation preserves coverage ceiling");
+        CHECK(rep.fmin_hz != rep.bin_centers.front() &&
+                  rep.fmax_hz != rep.bin_centers.back(),
+              "decimation does not relabel retained centers as coverage edges");
+        CHECK(rep.phase == RepresentationPhase::NotApplicable,
+              "decimation stays phase N/A");
+    }
+
+    // --- STFT contrast: there the range IS the kept center span -----------
+    {
+        const SpectralDataset d = make_stft(false);
+        const SpectralDataset s = d.filter_band(1000.0f, 4000.0f);
+        CHECK(s.representation().fmin_hz ==
+                      s.frequency_axis().bin_frequencies.front() &&
+                  s.representation().fmax_hz ==
+                      s.frequency_axis().bin_frequencies.back(),
+              "stft range still follows the kept centers");
+        CHECK(s.representation().bins == 0, "stft count still implied after slice");
+        const SpectralDataset t = d.downsample_frequency(4);
+        CHECK(t.representation().fmin_hz ==
+                      t.frequency_axis().bin_frequencies.front() &&
+                  t.representation().fmax_hz ==
+                      t.frequency_axis().bin_frequencies.back(),
+              "stft decimated range still follows the kept centers");
+    }
+}
+
 int main() {
     test_stft_valid();
     test_stft_invalid();
     test_nonstft_valid();
     test_nonstft_invalid();
     test_transforms();
+    test_mel_transform_coverage();
     test_refusals();
     test_serialization_roundtrip();
     std::printf("\n=== representation_contract: %d/%d passed ===\n", g_pass, g_run);

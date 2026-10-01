@@ -650,9 +650,21 @@ namespace {
 // Refresh axis + representation metadata after keeping an ordered subset
 // of bins with the given centers. Kind, norm, phase capability, and
 // reassignment support are preserved untouched: frequency slicing keeps
-// WHAT was computed with a narrowed range. STFT axes keep sr/2 + sr/N
-// (still true for slices/decimations); explicit axes refresh their
-// nominal maximum/mean-spacing from the kept centers.
+// WHAT was computed. The two representations retarget differently because
+// their ranges mean different things (see representation.h):
+//   - STFT: bins ARE frequency samples, so the explicit range is exactly the
+//     kept center span. Counts go back to implied (grid-derivable); STFT
+//     nyquist/resolution are untouched.
+//   - Filterbank kinds (Mel et al.): fmin_hz/fmax_hz are the first filter's
+//     left edge and the last filter's right edge — coverage, not centers.
+//     Selecting bands keeps bands of the SAME filterbank, so every retained
+//     band keeps its original support and that coverage is unchanged; it is
+//     preserved rather than rewritten to the retained center span. Because
+//     bands are only ever dropped from an already-covered span, the retained
+//     centers stay inside the preserved coverage — the exact relation the
+//     filterbank validation contract requires.
+// Explicit axes refresh their nominal maximum/mean-spacing from the kept
+// centers (descriptive fields, never the representation range).
 void retarget_frequency_bins(FrequencyAxis& ax, RepresentationInfo& rep,
                              int& meta_bins, std::vector<float> centers,
                              bool is_stft) {
@@ -667,16 +679,19 @@ void retarget_frequency_bins(FrequencyAxis& ax, RepresentationInfo& rep,
         // mistaken for a new FFT grid. The explicit range below pins the
         // actual span; subset-of-grid validation covers the rest.
         rep.bins = 0;
-    } else if (rep.bins != 0) {
-        rep.bins = n;
+        if (!ax.bin_frequencies.empty()) {
+            rep.fmin_hz = ax.bin_frequencies.front();
+            rep.fmax_hz = ax.bin_frequencies.back();
+        }
+    } else {
         // Mel binds bands to bins (validated as bins == bands); keep them
         // in step so slicing a Mel dataset stays a valid Mel dataset.
-        if (rep.kind == RepresentationKind::Mel && rep.bands != 0) rep.bands = n;
-    }
-    if (!ax.bin_frequencies.empty()) {
-        rep.fmin_hz = ax.bin_frequencies.front();
-        rep.fmax_hz = ax.bin_frequencies.back();
-        if (!is_stft) {
+        if (rep.bins != 0) {
+            rep.bins = n;
+            if (rep.kind == RepresentationKind::Mel && rep.bands != 0) rep.bands = n;
+        }
+        // rep.fmin_hz / rep.fmax_hz intentionally NOT rewritten.
+        if (!ax.bin_frequencies.empty()) {
             ax.nyquist = ax.bin_frequencies.back();
             ax.resolution =
                 n > 1 ? (ax.bin_frequencies.back() - ax.bin_frequencies.front()) /
