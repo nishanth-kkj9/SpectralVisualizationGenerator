@@ -356,14 +356,18 @@ static void test_transforms() {
         CHECK(s.frame_count() == d.frame_count(), "slice keeps frames");
     }
     {
+        // Mel frequency transforms are refused: the retained-band coverage
+        // cannot be described by the current metadata model, so the input is
+        // returned unchanged rather than relabelled (the full contract is
+        // covered by test_mel_transform_refusals() below).
         auto d = make_mel_like();
         auto s = d.filter_band(200.0f, 2000.0f);
-        CHECK(s.validate().valid, "mel slice validates");
-        CHECK(s.representation().bins == s.num_frequency_bins(), "mel bins updated");
-        CHECK(s.representation().bin_centers == s.frequency_axis().bin_frequencies,
-              "mel centers tracked");
-        CHECK(s.frequency_axis().nyquist == s.frequency_axis().bin_frequencies.back(),
-              "mel nyquist follows last center");
+        CHECK(s == d, "mel slice refused, dataset returned unchanged");
+        CHECK(s.validate().valid, "refused mel slice stays valid");
+        CHECK(s.num_frequency_bins() == d.num_frequency_bins(),
+              "refused mel slice keeps every band");
+        CHECK(s.representation() == d.representation(),
+              "refused mel slice keeps representation metadata");
         for (int f = 0; f < s.frame_count(); ++f)
             CHECK(s.frame(f).phases.empty(), "mel slice stays phaseless");
     }
@@ -377,8 +381,10 @@ static void test_transforms() {
     {
         auto d = make_mel_like();
         auto s = d.downsample_frequency(2);
-        CHECK(s.validate().valid, "mel decimation validates");
-        CHECK(s.num_frequency_bins() == 32, "mel decimation halves");
+        CHECK(s == d, "mel decimation refused, dataset returned unchanged");
+        CHECK(s.validate().valid, "refused mel decimation stays valid");
+        CHECK(s.num_frequency_bins() == d.num_frequency_bins(),
+              "refused mel decimation keeps every band");
     }
     {
         auto d = make_mel_like();
@@ -543,15 +549,19 @@ static void test_serialization_roundtrip() {
     }
 }
 
-// Mel filterbank coverage must survive band selection. filter_band() and
-// downsample_frequency() drop bands of the SAME filterbank, so every retained
-// band keeps its original support and the declared coverage edges are
-// unchanged. Rewriting fmin_hz/fmax_hz to the retained center span (the
-// pre-fix behavior) relabels a filter center as a coverage edge — claiming
-// coverage the retained filters do not have. These assertions inspect the
-// metadata itself, not merely validate(), and each one fails on that behavior.
-static void test_mel_transform_coverage() {
-    std::printf("[mel_transform_coverage]\n");
+// Mel frequency transforms are REFUSED, never retargeted. A Mel dataset
+// declares coverage (fmin_hz/fmax_hz = first filter's left edge .. last
+// filter's right edge) but RepresentationInfo stores only band CENTERS — the
+// per-filter {left, right} supports are never retained — so after dropping
+// outer bands the retained filters' true coverage is unrecoverable. The model
+// cannot recompute it and must not fabricate it, so filter_band() and
+// downsample_frequency() return the input unchanged (the same no-op convention
+// the dimension guards use). These assertions inspect the metadata itself, not
+// merely validate(): the pre-fix behavior returned a reduced dataset whose
+// declared range described different filters than it contained, so every
+// "unchanged" assertion below fails on it.
+static void test_mel_transform_refusals() {
+    std::printf("[mel_transform_refusals]\n");
     const SpectralDataset mel = make_real_mel();
     CHECK(mel.validate().valid, "real mel fixture validates");
     CHECK(mel.num_frequency_bins() == 24, "fixture band count");
@@ -563,68 +573,79 @@ static void test_mel_transform_coverage() {
           "coverage starts below the first center");
     CHECK(cov_max > mel.representation().bin_centers.back(),
           "coverage ends above the last center");
+    const std::vector<float>& c = mel.representation().bin_centers;
 
-    // --- filter_band(): contiguous band selection --------------------------
+    // --- filter_band(): contiguous band selection is refused --------------
     {
-        const std::vector<float>& c = mel.representation().bin_centers;
         const SpectralDataset s = mel.filter_band(c[5], c[11]);
-        const RepresentationInfo& rep = s.representation();
-        CHECK(s.num_frequency_bins() == 7, "slice keeps bands 5..11");
-        CHECK(s.validate().valid, "mel slice validates");
-        CHECK(rep.kind == RepresentationKind::Mel, "slice keeps kind");
-        CHECK(rep.bins == 7, "slice bins = retained bands");
-        CHECK(rep.bands == 7, "slice bands stay synchronized with bins");
-        CHECK(rep.bin_centers == std::vector<float>(c.begin() + 5, c.begin() + 12),
-              "slice centers are exactly the retained centers");
-        CHECK(rep.fmin_hz == cov_min, "slice preserves coverage floor");
-        CHECK(rep.fmax_hz == cov_max, "slice preserves coverage ceiling");
-        CHECK(rep.fmin_hz != rep.bin_centers.front() &&
-                  rep.fmax_hz != rep.bin_centers.back(),
-              "slice does not relabel retained centers as coverage edges");
-        CHECK(rep.fmin_hz < rep.bin_centers.front() &&
-                  rep.fmax_hz > rep.bin_centers.back(),
-              "retained centers stay inside the preserved coverage");
-        CHECK(rep.phase == RepresentationPhase::NotApplicable,
-              "slice stays phase N/A");
-        CHECK(!rep.reassignment_supported, "slice keeps reassignment off");
+        CHECK(s == mel, "mel filter_band refused, input returned unchanged");
+        CHECK(s.validate().valid, "refused filter_band result stays valid");
+        CHECK(s.num_frequency_bins() == 24, "refused filter_band keeps all bands");
+        CHECK(s.representation() == mel.representation(),
+              "refused filter_band metadata is not rewritten");
+        CHECK(s.frame_count() == mel.frame_count(),
+              "refused filter_band keeps every frame");
         for (int f = 0; f < s.frame_count(); ++f)
-            CHECK(s.frame(f).phases.empty(), "slice frames stay phaseless");
-        // JSON must carry the corrected metadata, not "repair" it.
+            CHECK(s.frame(f) == mel.frame(f),
+                  "refused filter_band leaves frame DSP values untouched");
+        CHECK(s.representation().phase == RepresentationPhase::NotApplicable,
+              "refused filter_band stays phase N/A");
+        CHECK(!s.representation().reassignment_supported,
+              "refused filter_band keeps reassignment off");
+        for (int f = 0; f < s.frame_count(); ++f)
+            CHECK(s.frame(f).phases.empty(), "refused filter_band stays phaseless");
+        // JSON round-trips the (unchanged) Mel contract as Mel, not STFT.
         SpectralDataset loaded;
-        CHECK(loaded.deserialize_json(s.serialize_json()), "sliced mel json loads");
-        CHECK(loaded.representation() == rep,
-              "sliced mel representation round-trips");
-        CHECK(loaded.validate().valid, "loaded sliced mel validates");
-        CHECK(loaded.representation().fmin_hz == cov_min &&
-                  loaded.representation().fmax_hz == cov_max,
-              "round-trip keeps coverage, not the center span");
+        CHECK(loaded.deserialize_json(s.serialize_json()),
+              "refused filter_band json loads");
+        CHECK(loaded.representation().kind == RepresentationKind::Mel,
+              "refused filter_band round-trips as Mel, not STFT");
+        CHECK(loaded.representation() == mel.representation(),
+              "refused filter_band representation round-trips");
+        CHECK(loaded.validate().valid, "loaded refused filter_band validates");
     }
 
-    // --- downsample_frequency(): strided band selection --------------------
+    // --- downsample_frequency(): strided band selection is refused --------
     {
-        const std::vector<float>& c = mel.representation().bin_centers;
         const SpectralDataset s = mel.downsample_frequency(3);
-        const RepresentationInfo& rep = s.representation();
-        std::vector<float> keep;
-        for (size_t k = 0; k < c.size(); k += 3) keep.push_back(c[k]);
-        CHECK(keep.size() == 8, "stride-3 keeps 8 of 24 bands");
-        CHECK(s.validate().valid, "mel decimation validates");
-        CHECK(rep.bins == 8, "decimated bins");
-        CHECK(rep.bands == 8, "decimated bands stay synchronized with bins");
-        CHECK(rep.bin_centers == keep, "decimated centers are the strided centers");
-        CHECK(rep.fmin_hz == cov_min, "decimation preserves coverage floor");
-        CHECK(rep.fmax_hz == cov_max, "decimation preserves coverage ceiling");
-        CHECK(rep.fmin_hz != rep.bin_centers.front() &&
-                  rep.fmax_hz != rep.bin_centers.back(),
-              "decimation does not relabel retained centers as coverage edges");
-        CHECK(rep.phase == RepresentationPhase::NotApplicable,
-              "decimation stays phase N/A");
+        CHECK(s == mel, "mel downsample_frequency refused, unchanged");
+        CHECK(s.validate().valid, "refused decimation result stays valid");
+        CHECK(s.num_frequency_bins() == 24, "refused decimation keeps all bands");
+        CHECK(s.representation() == mel.representation(),
+              "refused decimation metadata is not rewritten");
+        CHECK(s.representation().bands == 24,
+              "refused decimation keeps bands synchronized with bins");
+        CHECK(s.representation().phase == RepresentationPhase::NotApplicable,
+              "refused decimation stays phase N/A");
     }
 
-    // --- STFT contrast: there the range IS the kept center span -----------
+    // --- nested / repeated attempts stay refused and unchanged ------------
+    {
+        const SpectralDataset s = mel.filter_band(c[3], c[20])
+                                      .downsample_frequency(4)
+                                      .filter_band(300.0f, 3000.0f);
+        CHECK(s == mel, "chained mel transforms all refused, unchanged");
+        CHECK(s.validate().valid, "chained refused result stays valid");
+    }
+
+    // --- single-band edge cases are refused, never mis-described ----------
+    {
+        const SpectralDataset one = mel.filter_band(c[10], c[10]);  // one center
+        CHECK(one == mel, "single-center filter_band refused, unchanged");
+        CHECK(one.num_frequency_bins() == 24,
+              "single-center filter_band keeps all bands");
+        const SpectralDataset stride = mel.downsample_frequency(24);  // to one band
+        CHECK(stride == mel, "single-band decimation refused, unchanged");
+        CHECK(stride.num_frequency_bins() == 24,
+              "single-band decimation keeps all bands");
+    }
+
+    // --- STFT contrast: there the transforms DO retarget the range -------
     {
         const SpectralDataset d = make_stft(false);
         const SpectralDataset s = d.filter_band(1000.0f, 4000.0f);
+        CHECK(s.num_frequency_bins() < d.num_frequency_bins(),
+              "stft filter_band still narrows");
         CHECK(s.representation().fmin_hz ==
                       s.frequency_axis().bin_frequencies.front() &&
                   s.representation().fmax_hz ==
@@ -632,6 +653,8 @@ static void test_mel_transform_coverage() {
               "stft range still follows the kept centers");
         CHECK(s.representation().bins == 0, "stft count still implied after slice");
         const SpectralDataset t = d.downsample_frequency(4);
+        CHECK(t.num_frequency_bins() < d.num_frequency_bins(),
+              "stft downsample_frequency still decimates");
         CHECK(t.representation().fmin_hz ==
                       t.frequency_axis().bin_frequencies.front() &&
                   t.representation().fmax_hz ==
@@ -646,7 +669,7 @@ int main() {
     test_nonstft_valid();
     test_nonstft_invalid();
     test_transforms();
-    test_mel_transform_coverage();
+    test_mel_transform_refusals();
     test_refusals();
     test_serialization_roundtrip();
     std::printf("\n=== representation_contract: %d/%d passed ===\n", g_pass, g_run);

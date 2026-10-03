@@ -102,21 +102,25 @@ On top of S6.0-H1, the following are now enforced:
   grid; phase normalization without phase capability fails; multiband
   output (phaseless by construction) is tagged phase N/A.
 - **Transforms**: `filter_band` / `downsample_frequency` retarget axis,
-  analysis bin count, and the representation's bins/centers. The *range* is
-  retargeted only for STFT, whose bins ARE frequency samples and whose
-  explicit range is therefore exactly the kept center span (counts go back
-  to implied). For filterbank kinds (Mel et al.) the range is *coverage* —
-  first filter's left edge .. last filter's right edge — and selecting bands
-  keeps bands of the same filterbank, so the coverage is preserved rather
-  than rewritten; republishing the retained center span would relabel a
-  filter center as a coverage edge, claiming coverage the retained filters
-  do not have. Retained centers therefore stay INSIDE the preserved
-  coverage. STFT nyquist/resolution are untouched and explicit axes refresh
-  their nominal max/mean-spacing from the kept centers (descriptive fields,
-  never the representation range). Both transforms also slice reassigned
-  arrays and refuse invalid input instead of reading out of bounds.
-  Phase-less data stays phase-less; `export_csv` leaves the phase column
-  empty rather than fabricating values.
+  analysis bin count, and the representation's bins/centers for **STFT**,
+  whose bins ARE frequency samples and whose explicit range is therefore
+  exactly the kept center span (counts go back to implied; nyquist/resolution
+  are untouched). For **Mel** these transforms are **refused**: a Mel dataset
+  declares coverage (`fmin_hz`/`fmax_hz` = first filter's left edge .. last
+  filter's right edge, see above) but `RepresentationInfo` stores only band
+  *centers* — never the per-filter `{left, right}` supports. Dropping outer
+  bands changes the retained filters' true coverage, which the current model
+  cannot recompute: republishing the retained center span would relabel a
+  center as a coverage edge, while keeping the original range would claim
+  coverage the retained filters no longer have. Rather than return metadata
+  that describes different filters than the dataset contains, the transform
+  is a documented no-op — the input dataset is returned unchanged, the same
+  refusal convention `check_dimensions`/`frames_match_axis` use. Enabling Mel
+  frequency transforms later requires storing explicit filter-edge
+  provenance in the representation. Both transforms also slice reassigned
+  arrays where the kind permits it and refuse invalid input instead of
+  reading out of bounds. Phase-less data stays phase-less; `export_csv`
+  leaves the phase column empty rather than fabricating values.
 - **Renderers are STFT-only by contract**: spectrogram, spectrum, video,
   and GPU paths return `UnsupportedRepresentation` for anything else
   instead of drawing FFT pictures of filterbank data (mapped to

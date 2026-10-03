@@ -647,24 +647,32 @@ std::vector<float> SpectralDataset::min_magnitude_spectrum() const {
 
 namespace {
 
+// Filterbank representations (currently Mel) declare coverage in
+// fmin_hz/fmax_hz — first filter's left edge .. last filter's right edge —
+// but RepresentationInfo stores only band CENTERS; the per-filter
+// {left, right} supports are not retained. After dropping outer bands the
+// true coverage of the retained filters is therefore not recoverable (for a
+// single retained band it is simply unknown). Rewriting the range to the
+// retained center span would relabel a filter center as a coverage edge;
+// keeping the original range would claim coverage the retained filters no
+// longer have. Neither is truthful, so frequency transforms are refused for
+// these kinds until the model records explicit filter-edge provenance.
+// Callers get the original dataset back unchanged — the same no-op
+// convention check_dimensions()/frames_match_axis() use.
+bool refuses_frequency_transform(const RepresentationInfo& rep) {
+    return rep.kind == RepresentationKind::Mel;
+}
+
 // Refresh axis + representation metadata after keeping an ordered subset
 // of bins with the given centers. Kind, norm, phase capability, and
 // reassignment support are preserved untouched: frequency slicing keeps
-// WHAT was computed. The two representations retarget differently because
-// their ranges mean different things (see representation.h):
-//   - STFT: bins ARE frequency samples, so the explicit range is exactly the
-//     kept center span. Counts go back to implied (grid-derivable); STFT
-//     nyquist/resolution are untouched.
-//   - Filterbank kinds (Mel et al.): fmin_hz/fmax_hz are the first filter's
-//     left edge and the last filter's right edge — coverage, not centers.
-//     Selecting bands keeps bands of the SAME filterbank, so every retained
-//     band keeps its original support and that coverage is unchanged; it is
-//     preserved rather than rewritten to the retained center span. Because
-//     bands are only ever dropped from an already-covered span, the retained
-//     centers stay inside the preserved coverage — the exact relation the
-//     filterbank validation contract requires.
-// Explicit axes refresh their nominal maximum/mean-spacing from the kept
-// centers (descriptive fields, never the representation range).
+// WHAT was computed. The explicit range is retargeted ONLY for STFT, whose
+// bins ARE frequency samples and whose range IS the kept center span;
+// counts go back to implied (grid-derivable) and nyquist/resolution are
+// untouched. Any other kind reaching here (Mel is refused earlier by
+// refuses_frequency_transform()) keeps its explicit range untouched rather
+// than fabricating a range that is not this kind's meaning; the nominal
+// axis max/spacing is refreshed from the kept centers as descriptive data.
 void retarget_frequency_bins(FrequencyAxis& ax, RepresentationInfo& rep,
                              int& meta_bins, std::vector<float> centers,
                              bool is_stft) {
@@ -684,8 +692,8 @@ void retarget_frequency_bins(FrequencyAxis& ax, RepresentationInfo& rep,
             rep.fmax_hz = ax.bin_frequencies.back();
         }
     } else {
-        // Mel binds bands to bins (validated as bins == bands); keep them
-        // in step so slicing a Mel dataset stays a valid Mel dataset.
+        // Non-STFT kinds keep explicit counts in step with the sliced axis.
+        // (Mel never reaches this branch; it is refused before the call.)
         if (rep.bins != 0) {
             rep.bins = n;
             if (rep.kind == RepresentationKind::Mel && rep.bands != 0) rep.bands = n;
@@ -719,6 +727,11 @@ bool frames_match_axis(const SpectralDataset& d, const FrequencyAxis& ax) {
 
 SpectralDataset SpectralDataset::filter_band(float low_hz, float high_hz) const {
     if (!check_dimensions()) return *this;
+    // Refuse (no-op) when the retained-band coverage cannot be described
+    // truthfully by the current metadata model — see
+    // refuses_frequency_transform(). Returning the input unchanged keeps the
+    // declared range describing exactly the filters the dataset contains.
+    if (refuses_frequency_transform(representation_)) return *this;
     SpectralDataset out = *this;
     int lo = -1, hi = -1;
     for (int k = 0; k < freq_axis_.num_bins; ++k) {
@@ -810,6 +823,8 @@ SpectralDataset SpectralDataset::downsample_time(int factor) const {
 SpectralDataset SpectralDataset::downsample_frequency(int factor) const {
     if (factor <= 1) return *this;
     if (!check_dimensions()) return *this;
+    // Same refusal as filter_band(): Mel coverage is not retargetable.
+    if (refuses_frequency_transform(representation_)) return *this;
     SpectralDataset out = *this;
     if (!frames_match_axis(*this, freq_axis_)) return *this;
     std::vector<float> centers;
