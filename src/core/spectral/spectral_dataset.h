@@ -19,12 +19,20 @@ namespace Spectral {
 // v3 (S5): explicit little-endian wire format (no native POD memcpy),
 // reassigned arrays serialized, strict version gate. v1/v2 blobs are
 // rejected — the layout contract changed. History: v1 initial, v2 added
-// method/band_count, v3 explicit LE + reassigned + strict gate.
-// S6.0 NOTE (v4 boundary): representation metadata (RepresentationInfo)
-// is intentionally NOT in the v3 binary yet. Non-STFT representations
-// change the meaning and shape of frequency data, so persisting them
-// needs a v4 layout; v4 is designed but not implemented in S6.0.
-constexpr uint32_t SPECTRAL_DATASET_VERSION = 3;
+// method/band_count, v3 explicit LE + reassigned + strict gate, v4 added
+// the representation section + per-kind frame width rules.
+// v4 (S6.0 design, implemented after Phase 9): the binary now carries
+// the representation contract (kind/bins/centers/phase capability), so
+// non-STFT (Mel) datasets persist and reload through the binary format
+// and get a real dataset_identity(). The section sits at the head of
+// the payload, length-prefixed, and frame readers enforce per-kind
+// widths (STFT follows the FFT-grid axis; non-STFT follows the
+// representation bins). MIN_COMPATIBLE stays 3: the v3 gate's rejection
+// of v1/v2 is preserved, and a v3 blob is still unambiguous (STFT-only;
+// its representation is restated from the payload itself — axis bins
+// plus reassignment-presence proof), so v3 loads through a compat path
+// while v4 writers emit the new layout only.
+constexpr uint32_t SPECTRAL_DATASET_VERSION = 4;
 constexpr uint32_t SPECTRAL_DATASET_MIN_COMPATIBLE_VERSION = 3;
 
 // ============================================================================
@@ -460,8 +468,9 @@ private:
     TimeAxis time_axis_;
     ChannelInfo channel_info_;
     // What the bins mean. STFT default mirrors the FFT grid; non-STFT
-    // kinds carry explicit counts/centers (never N/2+1). In-memory in v3
-    // (persisted in JSON; binary persistence waits for the v4 layout).
+    // kinds carry explicit counts/centers (never N/2+1). Persisted in
+    // JSON since S6.0 and in the binary since v4 (representation section
+    // at the head of the payload).
     RepresentationInfo representation_;
     
     // Internal validation
@@ -476,6 +485,10 @@ private:
     bool read_frames(const uint8_t* data, size_t size, size_t& offset);
     void write_metadata(std::vector<uint8_t>& out) const;
     bool read_metadata(const uint8_t* data, size_t size, size_t& offset);
+    // v4 representation section (head of the payload, length-prefixed).
+    // Mirrors the JSON representation section field-for-field.
+    void write_representation(std::vector<uint8_t>& out) const;
+    bool read_representation(const uint8_t* data, size_t size, size_t& offset);
     void write_axes(std::vector<uint8_t>& out) const;
     bool read_axes(const uint8_t* data, size_t size, size_t& offset);
 };
