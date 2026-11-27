@@ -650,12 +650,13 @@ static void test_render_fingerprint_serial() {
     CHECK(Spectral::run_job(cfg) == Spectral::JobError::Ok, "mel image job ok");
     CHECK(fs::exists(g_dir / "mel.png"), "mel image produced");
     {
-        // Spectrum visualization stays STFT-only: clear typed refusal.
+        // Spectrum visualization stays STFT-only: now rejected at validation
+        // (BadConfig, before decode/analysis) instead of at render time.
         auto c2 = cfg;
         c2.visualization = "spectrum";
         c2.output_path = (g_dir / "mel_spec.png").string();
-        CHECK(Spectral::run_job(c2) == Spectral::JobError::RenderError,
-              "mel spectrum refused as RenderError");
+        CHECK(Spectral::run_job(c2) == Spectral::JobError::BadConfig,
+              "mel spectrum refused as BadConfig at validation");
     }
     {
         // Video path renders Mel frames (ffmpeg-gated like other video tests).
