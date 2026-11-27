@@ -121,10 +121,15 @@ On top of S6.0-H1, the following are now enforced:
   arrays where the kind permits it and refuse invalid input instead of
   reading out of bounds. Phase-less data stays phase-less; `export_csv`
   leaves the phase column empty rather than fabricating values.
-- **Renderers are STFT-only by contract**: spectrogram, spectrum, video,
-  and GPU paths return `UnsupportedRepresentation` for anything else
-  instead of drawing FFT pictures of filterbank data (mapped to
-  `RenderError`/`EncodeError` with the kind named).
+- **Renderers were STFT-only by contract in Phase 8**: spectrogram,
+  spectrum, video, and GPU paths returned `UnsupportedRepresentation` for
+  anything else instead of drawing FFT pictures of filterbank data (mapped
+  to `RenderError`/`EncodeError` with the kind named). Phase 9 update: the
+  spectrogram path gained a dedicated `MelSpectrogramRenderer` (explicit
+  band centers to pixels) and `VideoRenderer` dispatches Mel datasets
+  through it; the spectrum plot and the GPU (D3D11) path remain STFT-only,
+  and the pipeline rejects `visualization=spectrum` with a Mel
+  representation at validation.
 - **Serialization**: binary resets stale representation state on load
   (v3 is STFT-only); JSON resets then parses, round-tripping kind,
   bins, range, bands, q, norm, phase, reassignment, version,
