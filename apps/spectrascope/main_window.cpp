@@ -17,6 +17,8 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QStandardItem>
+#include <QStandardItemModel>
 #include <QThread>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -46,6 +48,33 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     vizCombo_->addItems({QStringLiteral("Spectrogram"), QStringLiteral("Spectrum")});
     form->addRow(QStringLiteral("Visualization:"), vizCombo_);
 
+    // Representation is WHAT is computed — unlike the frequency-scale combo
+    // below, which only remaps the display. Mel runs a real triangular Mel
+    // filterbank over STFT power; STFT keeps FFT bins (phases included).
+    reprCombo_ = new QComboBox(this);
+    reprCombo_->addItems({QStringLiteral("STFT (FFT bins)"),
+                          QStringLiteral("Mel filterbank")});
+    connect(reprCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &MainWindow::onRepresentationChanged);
+    form->addRow(QStringLiteral("Representation:"), reprCombo_);
+
+    // Mel-only knobs; disabled until the representation combo selects Mel
+    // (the pipeline defaults cover STFT runs, so they are never collected
+    // for STFT).
+    melBandsSpin_ = new QSpinBox(this);
+    melBandsSpin_->setRange(1, 257);  // refined per FFT size in updateMelBandsBounds
+    melBandsSpin_->setValue(64);
+    melBandsSpin_->setSuffix(QStringLiteral(" bands"));
+    melBandsSpin_->setEnabled(false);
+    form->addRow(QStringLiteral("Mel bands:"), melBandsSpin_);
+
+    melNormCombo_ = new QComboBox(this);
+    melNormCombo_->addItems({QStringLiteral("none"), QStringLiteral("slaney"),
+                             QStringLiteral("area")});
+    melNormCombo_->setCurrentIndex(1);  // default matches the pipeline default
+    melNormCombo_->setEnabled(false);
+    form->addRow(QStringLiteral("Mel normalization:"), melNormCombo_);
+
     formatCombo_ = new QComboBox(this);
     formatCombo_->addItems({QStringLiteral("Image (PNG)"), QStringLiteral("Video (MP4)")});
     form->addRow(QStringLiteral("Output format:"), formatCombo_);
@@ -53,7 +82,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     presetCombo_ = new QComboBox(this);
     presetCombo_->addItems({QStringLiteral("Voice (1024, hann)"),
                             QStringLiteral("Music (2048, hann)"),
-                            QStringLiteral("Detail (4096, blackman, mel)")});
+                            QStringLiteral("Detail (4096, blackman, mel scale)"),
+                            QStringLiteral("Mel filterbank (2048, hann, 128 bands)")});
     connect(presetCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &MainWindow::applyPreset);
     form->addRow(QStringLiteral("Analysis preset:"), presetCombo_);
@@ -62,6 +92,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     fftCombo_->addItems({QStringLiteral("512"), QStringLiteral("1024"),
                          QStringLiteral("2048"), QStringLiteral("4096")});
     fftCombo_->setCurrentIndex(1);
+    // The mel-bands spin bounds track the FFT combo, so the GUI can never
+    // build a mel-bands value outside [1, fft-bins].
+    connect(fftCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &MainWindow::updateMelBandsBounds);
     form->addRow(QStringLiteral("FFT size:"), fftCombo_);
 
     windowCombo_ = new QComboBox(this);
@@ -137,6 +171,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     layout->addWidget(openBtn_);
 
     setCentralWidget(central);
+    // Sync the derived widget states once after all widgets exist (the
+    // signal connections above only cover later user/preset changes).
+    updateMelBandsBounds();
+    onRepresentationChanged(reprCombo_->currentIndex());
     applyPreset(0);
 }
 
@@ -179,34 +217,65 @@ void MainWindow::browseOutput() {
 void MainWindow::applyPreset(int index) {
     // ponytail: presets just set widget values; single source of truth stays in widgets
     if (index == 0) {      // Voice
+        reprCombo_->setCurrentIndex(0);
         fftCombo_->setCurrentIndex(1);  // 1024
         windowCombo_->setCurrentIndex(0);
         scaleCombo_->setCurrentIndex(0);
         dbSpin_->setValue(80);
     } else if (index == 1) {  // Music
+        reprCombo_->setCurrentIndex(0);
         fftCombo_->setCurrentIndex(2);  // 2048
         windowCombo_->setCurrentIndex(0);
         scaleCombo_->setCurrentIndex(0);
         dbSpin_->setValue(90);
-    } else {  // Detail
+    } else if (index == 2) {  // Detail: mel DISPLAY scale over STFT data
+        reprCombo_->setCurrentIndex(0);
         fftCombo_->setCurrentIndex(3);  // 4096
         windowCombo_->setCurrentIndex(2);
         scaleCombo_->setCurrentIndex(2);
         dbSpin_->setValue(90);
+    } else {  // Mel filterbank: real Mel representation
+        reprCombo_->setCurrentIndex(1);
+        fftCombo_->setCurrentIndex(2);  // 2048
+        windowCombo_->setCurrentIndex(0);
+        scaleCombo_->setCurrentIndex(0);
+        melBandsSpin_->setValue(128);
+        melNormCombo_->setCurrentIndex(1);  // slaney
+        dbSpin_->setValue(90);
     }
 }
 
-void MainWindow::setRunning(bool running) {
-    generateBtn_->setEnabled(!running);
-    cancelBtn_->setEnabled(running);
-    openBtn_->setEnabled(!running && !lastOutput_.isEmpty());
-    if (running) progressBar_->setValue(0);
+void MainWindow::onRepresentationChanged(int index) {
+    const bool mel = (index == 1);
+    melBandsSpin_->setEnabled(mel);
+    melNormCombo_->setEnabled(mel);
+    // Reassignment needs STFT phase and the spectrum plot renderer is
+    // STFT-only; the GUI refuses both combinations up front instead of
+    // surfacing a validation error only after Generate.
+    reassignCheck_->setEnabled(!mel);
+    if (mel) reassignCheck_->setChecked(false);
+    setVizOptionEnabled(1 /* Spectrum */, !mel);
+    if (mel && vizCombo_->currentIndex() == 1) vizCombo_->setCurrentIndex(0);
 }
 
-void MainWindow::generate() {
-    // A deferred close is pending: the window is going away, so no new
-    // jobs may start (this also keeps closing_ meaningful).
-    if (closing_) return;
+void MainWindow::updateMelBandsBounds() {
+    // Validation caps mel-bands at fft-bins (fft/2 + 1); track the combo so
+    // the spin can never hold an out-of-range value.
+    const int fft = fftCombo_->currentText().toInt();
+    const int max_bands = fft / 2 + 1;
+    melBandsSpin_->setMaximum(max_bands);
+    if (melBandsSpin_->value() > max_bands) melBandsSpin_->setValue(max_bands);
+}
+
+void MainWindow::setVizOptionEnabled(int index, bool enabled) {
+    // QComboBox exposes per-item flags through its (default item) model;
+    // a disabled item is shown greyed and cannot be selected.
+    auto* model = qobject_cast<QStandardItemModel*>(vizCombo_->model());
+    if (!model) return;
+    if (QStandardItem* item = model->item(index)) item->setEnabled(enabled);
+}
+
+Spectral::GenerateConfig MainWindow::collectConfig() const {
     Spectral::GenerateConfig cfg;
     cfg.input_path = inputEdit_->text().toStdString();
     cfg.output_path = outputEdit_->text().toStdString();
@@ -225,6 +294,28 @@ void MainWindow::generate() {
     cfg.height = res.mid(x + 1).toInt();
     cfg.use_gpu = gpuCheck_->isChecked();
     cfg.reassigned = reassignCheck_->isChecked();
+    // Representation is what gets computed; the frequency-scale combo above
+    // stays a display mapping. Mel knobs are collected only for a Mel run.
+    cfg.representation = reprCombo_->currentIndex() == 1 ? "mel" : "stft";
+    if (cfg.representation == "mel") {
+        cfg.mel_bands = melBandsSpin_->value();
+        cfg.mel_norm = melNormCombo_->currentText().toStdString();
+    }
+    return cfg;
+}
+
+void MainWindow::setRunning(bool running) {
+    generateBtn_->setEnabled(!running);
+    cancelBtn_->setEnabled(running);
+    openBtn_->setEnabled(!running && !lastOutput_.isEmpty());
+    if (running) progressBar_->setValue(0);
+}
+
+void MainWindow::generate() {
+    // A deferred close is pending: the window is going away, so no new
+    // jobs may start (this also keeps closing_ meaningful).
+    if (closing_) return;
+    Spectral::GenerateConfig cfg = collectConfig();
 
     const std::string err = Spectral::validate_config(cfg);
     if (!err.empty()) {
@@ -318,6 +409,21 @@ void MainWindow::setInputForTest(const QString& p) {
 
 void MainWindow::setOutputForTest(const QString& p) {
     outputEdit_->setText(p);
+}
+
+void MainWindow::setRepresentationForTest(const QString& repr) {
+    // Drive the combo exactly like a user selection (signals included), so
+    // the lifecycle test exercises the real enable/disable contract too.
+    reprCombo_->setCurrentIndex(
+        repr.compare(QStringLiteral("mel"), Qt::CaseInsensitive) == 0 ? 1 : 0);
+}
+
+void MainWindow::setMelBandsForTest(int bands) {
+    melBandsSpin_->setValue(bands);
+}
+
+Spectral::GenerateConfig MainWindow::configForTest() const {
+    return collectConfig();
 }
 
 QString MainWindow::statusTextForTest() const {
