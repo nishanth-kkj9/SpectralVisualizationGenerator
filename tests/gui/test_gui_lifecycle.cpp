@@ -7,6 +7,7 @@
 // cancel-then-close, and reuse-after-completion all behave; no crash on
 // window destruction in any path.
 #include "main_window.h"
+#include "pipeline.h"
 
 #include <QApplication>
 #include <QThread>
@@ -181,6 +182,41 @@ static void test_reuse_after_completion() {
     delete w;
 }
 
+// 6. The real Mel representation is reachable from the GUI: the widget
+// state maps into GenerateConfig, and a full Mel job (filterbank analysis
+// + Mel renderer) runs to completion through the same worker thread.
+static void test_mel_representation_job() {
+    std::printf("[mel_representation_job]\n");
+    write_wav(g_dir / "mel.wav", 2);
+    const fs::path out = g_dir / "mel.png";
+    fs::remove(out);
+    auto* w = new MainWindow();
+    w->show();
+    w->setInputForTest(QString::fromStdString((g_dir / "mel.wav").string()));
+    w->setOutputForTest(QString::fromStdString(out.string()));
+    // Select the Mel filterbank representation like a user would (drives
+    // the combo, so the enable/disable contract runs too).
+    w->setRepresentationForTest(QStringLiteral("mel"));
+    w->setMelBandsForTest(96);
+    const Spectral::GenerateConfig cfg = w->configForTest();
+    CHECK(cfg.representation == "mel", "representation mapped from combo");
+    CHECK(cfg.mel_bands == 96, "mel bands mapped from spin");
+    CHECK(cfg.mel_norm == "slaney" || cfg.mel_norm == "none" ||
+              cfg.mel_norm == "area",
+          "mel norm mapped from combo");
+    CHECK(cfg.visualization == "spectrogram",
+          "mel keeps the spectrogram visualization");
+    w->generate();
+    CHECK(pump_until([&] { return !w->isJobActiveForTest(); }, 90000),
+          "mel job completes");
+    CHECK(w->statusTextForTest() == QStringLiteral("Done"), "mel job success");
+    CHECK(fs::exists(out), "mel output produced");
+    w->close();
+    pump();
+    CHECK(!w->isVisible(), "close after mel job accepted");
+    delete w;
+}
+
 int main(int argc, char** argv) {
     qputenv("QT_QPA_PLATFORM", QByteArray("offscreen"));
 #ifdef GUI_QPA_PLUGIN_PATH
@@ -201,6 +237,7 @@ int main(int argc, char** argv) {
     test_deferred_close(1, true);
     test_cancel_then_close();
     test_reuse_after_completion();
+    test_mel_representation_job();
     fs::remove_all(g_dir, ec);
     std::printf("\n=== gui_lifecycle: %d/%d passed ===\n", g_pass, g_run);
     return (g_pass == g_run) ? 0 : 1;

@@ -39,13 +39,20 @@ dist/          portable packaging output (git-ignored)
 
 ## Build
 
+The checked-in presets resolve the vcpkg toolchain from `VCPKG_ROOT`, so
+point it at your vcpkg checkout first (the `Visual Studio 18 2026` preset
+also needs CMake 4.0+; older tooling can configure manually as CI does):
+
 ```powershell
+$env:VCPKG_ROOT = "C:\path\to\vcpkg"
 cmake --preset windows-release
 cmake --build build --config Release
 ctest --test-dir build -C Release
 ```
 
-21 tests, all must pass. Binaries land in `build/Release/`.
+The full registered suite must pass (`ctest -N` lists the tests your build
+registered — optional targets such as the Qt GUI lifecycle and sanitizer
+tests depend on the environment). Binaries land in `build/Release/`.
 Portable packaging: `tools/packaging/package_portable.ps1`.
 Details in `docs/installation.md`.
 
@@ -54,7 +61,8 @@ Details in `docs/installation.md`.
 - User: `docs/` (installation, CLI/GUI usage, formats, methods,
   reproducibility, accuracy + benchmark methodology, limitations)
 - Licensing: `docs/licensing.md`, `THIRD-PARTY-NOTICES.md`
-- Architecture: `docs/architecture/ARCHITECTURE.md`
+- Architecture: `docs/architecture/SpectraScope_Architecture_2026-11-26.md`,
+  `docs/architecture/spectral-representations.md`
 - History: `docs/archive/` (phase plans, specs, notes)
 
 ## CI

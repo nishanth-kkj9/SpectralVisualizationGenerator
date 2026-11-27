@@ -101,6 +101,12 @@ std::string validate_config(const GenerateConfig& cfg) {
     if (cfg.representation != "stft" && cfg.representation != "mel")
         return "representation must be stft or mel";
     if (cfg.representation == "mel") {
+        // The spectrum plot aggregates FFT bins and the spectrum renderer
+        // refuses Mel datasets. Reject at validation — before any decode or
+        // analysis — instead of failing only at render time (same fail-closed
+        // rationale as the video bounds below).
+        if (cfg.visualization == "spectrum")
+            return "spectrum visualization requires the stft representation";
         if (cfg.reassigned)
             return "reassigned requires STFT and cannot combine with mel";
         if (cfg.mel_bands < 1 || cfg.mel_bands > cfg.fft_size / 2 + 1)

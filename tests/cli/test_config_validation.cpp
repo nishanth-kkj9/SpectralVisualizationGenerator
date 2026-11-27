@@ -191,12 +191,53 @@ static void test_strict_floats_and_scales() {
     }
 }
 
+static void test_representation_visualization_contract() {
+    std::printf("[representation_visualization_contract]\n");
+    // Mel + spectrogram is a valid combination for image and video output.
+    {
+        auto cfg = base_cfg();
+        cfg.representation = "mel";
+        cfg.mel_bands = 64;
+        CHECK(Spectral::validate_config(cfg).empty(), "mel + spectrogram valid");
+    }
+    // The spectrum plot is STFT-only: mel + spectrum must fail at validation,
+    // BEFORE decode/analysis (it used to fail only at render time).
+    {
+        auto cfg = base_cfg();
+        cfg.representation = "mel";
+        cfg.visualization = "spectrum";
+        const std::string err = Spectral::validate_config(cfg);
+        CHECK(!err.empty(), "mel + spectrum rejected");
+        CHECK(err.find("spectrum") != std::string::npos &&
+                  err.find("stft") != std::string::npos,
+              "names the spectrum/stft rule");
+    }
+    {
+        auto cfg = base_cfg();
+        cfg.representation = "mel";
+        cfg.visualization = "spectrum";
+        cfg.output_path = "cfgval_no_mel_spectrum.png";
+        const Spectral::Error err = Spectral::run_job(cfg);
+        CHECK(err.code == Spectral::JobError::BadConfig,
+              "mel + spectrum -> BadConfig (not a render error)");
+        CHECK(!fs::exists(cfg.output_path), "no output file produced");
+    }
+    // STFT + spectrum stays valid (the rule only binds mel).
+    {
+        auto cfg = base_cfg();
+        cfg.representation = "stft";
+        cfg.visualization = "spectrum";
+        CHECK(Spectral::validate_config(cfg).empty(), "stft + spectrum valid");
+    }
+}
+
 int main() {
     test_valid_windows();
     test_invalid_windows();
     test_hop_contract();
     test_rejected_before_decode();
     test_strict_floats_and_scales();
+    test_representation_visualization_contract();
     std::printf("\n=== config_validation: %d/%d passed ===\n", g_pass, g_run);
     return (g_pass == g_run) ? 0 : 1;
 }

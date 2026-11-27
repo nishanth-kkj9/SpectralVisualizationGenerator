@@ -7,6 +7,9 @@
 
 #include <atomic>
 
+// Return type of the configForTest() hook below; defined in pipeline.h.
+namespace Spectral { struct GenerateConfig; }
+
 class QComboBox;
 class QCheckBox;
 class QLineEdit;
@@ -32,6 +35,7 @@ private slots:
     void browseInput();
     void browseOutput();
     void applyPreset(int index);
+    void onRepresentationChanged(int index);
     void onProgress(int percent, const QString& stage);
     void onFinished(bool ok, const QString& message, const QString& outputPath);
     void onThreadFinished();
@@ -43,17 +47,28 @@ public slots:
 
 private:
     void setRunning(bool running);
+    // Widget state -> GenerateConfig (single mapping; generate() and the
+    // config test hook both use it, so the test observes what would run).
+    Spectral::GenerateConfig collectConfig() const;
+    // Mel band count must stay within [1, fft-bins] for the CURRENT fft
+    // combo value; the spin bounds track the combo.
+    void updateMelBandsBounds();
+    // QComboBox has no per-item enable API; its default model carries the flag.
+    void setVizOptionEnabled(int index, bool enabled);
 
     QLineEdit* inputEdit_;
     QLineEdit* outputEdit_;
     QComboBox* vizCombo_;
+    QComboBox* reprCombo_;     // what is computed: stft | mel filterbank
     QComboBox* formatCombo_;
     QComboBox* presetCombo_;
     QComboBox* fftCombo_;
     QComboBox* windowCombo_;
-    QComboBox* scaleCombo_;
+    QComboBox* scaleCombo_;    // display mapping only, never the representation
     QComboBox* resCombo_;
+    QComboBox* melNormCombo_;   // mel-only knob (enabled with representation=mel)
     QSpinBox* dbSpin_;
+    QSpinBox* melBandsSpin_;   // mel-only knob (enabled with representation=mel)
     QCheckBox* gpuCheck_;
     QCheckBox* reassignCheck_;
     QPushButton* generateBtn_;
@@ -76,6 +91,12 @@ public:
     // Test hooks (headless lifecycle tests only; no production use).
     void setInputForTest(const QString& p);
     void setOutputForTest(const QString& p);
+    // Drive the representation combo like a user would ("stft" | "mel");
+    // also sets a mel band count for the mel case.
+    void setRepresentationForTest(const QString& repr);
+    void setMelBandsForTest(int bands);
+    // The exact GenerateConfig generate() would submit right now.
+    Spectral::GenerateConfig configForTest() const;
     bool isJobActiveForTest() const { return thread_ != nullptr; }
     QString statusTextForTest() const;
 };
