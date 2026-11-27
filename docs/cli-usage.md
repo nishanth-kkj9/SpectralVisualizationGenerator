@@ -19,7 +19,9 @@ default 64) and `--mel-norm none|slaney|area` (default `slaney`) configure the
 filterbank and are rejected outside a Mel run. `--freq-scale` is purely
 display mapping and never changes the representation. `--reassigned` is
 STFT-only and fails when combined with `--representation mel`; Mel data is
-phaseless by contract. `--gpu` covers the STFT spectrogram renderer only —
+phaseless by contract. `-v spectrum` is also STFT-only: combined with
+`--representation mel` it is rejected at validation, before any decode.
+`--gpu` covers the STFT spectrogram renderer only —
 a Mel run renders on the CPU with identical geometry. Mel datasets persist
 through JSON (`--output-format` videos render through the Mel renderer); the
 dataset binary format stays STFT-only.
